@@ -1,0 +1,1201 @@
+[
+  {
+    "incident_id": "INC-H101",
+    "timestamp": "2026-06-12T14:23:10Z",
+    "service": "database",
+    "title": "PostgreSQL Connection Pool Exhaustion under Flash Sale Surge",
+    "severity": "critical",
+    "status": "resolved",
+    "symptoms": [
+      "504 Gateway Timeouts across checkout flows",
+      "Active database connections pinned at 100/100 max capacity",
+      "PostgreSQL rejecting new backend clients with FATAL error"
+    ],
+    "alerts": [
+      "PostgresActiveConnectionsHigh (>95%)",
+      "ApiGateway504Spike (>20%)"
+    ],
+    "relevant_metrics": {
+      "active_connections": 100,
+      "max_connections": 100,
+      "query_p99_latency_ms": 12400,
+      "error_rate_pct": 38.5
+    },
+    "deployment_context": {
+      "last_deployment": "v3.8.0",
+      "deployed_at": "2026-06-11T10:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Unclosed database sessions in checkout retry loops combined with inadequate pool max_connections configuration under 4x traffic surge.",
+    "actions_attempted": [
+      {
+        "action_type": "RESTART_DATABASE",
+        "parameters": {"graceful": false},
+        "outcome": "failed",
+        "reason": "Hard restart caused abrupt TCP connection resets, dropped warm buffer cache, and triggered an immediate thundering herd crash upon restart."
+      },
+      {
+        "action_type": "SCALE_CONNECTION_POOL",
+        "parameters": {"max_connections": 300, "idle_timeout_seconds": 30},
+        "outcome": "successful",
+        "reason": "Increased connection headroom from 100 to 300 and reclaimed abandoned idle connections within 30 seconds."
+      }
+    ],
+    "successful_actions": ["SCALE_CONNECTION_POOL"],
+    "failed_actions": ["RESTART_DATABASE"],
+    "resolution_time_minutes": 28,
+    "final_outcome": "Fully stabilized. Connection utilization dropped to 42%, p99 latency returned to 18ms.",
+    "engineer_feedback": {
+      "engineer": "sre_alex",
+      "rating": "5_stars",
+      "comment": "Never restart the primary DB under load. Increasing pool limit and aggressive idle connection reaping resolved it."
+    },
+    "lessons_learned": [
+      "Do not hard restart database primaries during traffic spikes without connection draining.",
+      "Tune max_connections and idle connection timeouts in PgBouncer pooler before marketing sales."
+    ]
+  },
+  {
+    "incident_id": "INC-H102",
+    "timestamp": "2026-06-20T09:15:40Z",
+    "service": "payment-api",
+    "title": "Stripe Third-Party Webhook Latency & Thread Pool Starvation",
+    "severity": "critical",
+    "status": "resolved",
+    "symptoms": [
+      "Payment authorization latency spiked from 180ms to 9,400ms",
+      "Worker thread saturation reached 98% on all payment-api pods",
+      "Queue backlog of 14,000 unconfirmed payment intents"
+    ],
+    "alerts": [
+      "PaymentApiLatencyCritical (>5000ms)",
+      "PaymentApiThreadStarvation (>90%)"
+    ],
+    "relevant_metrics": {
+      "p99_latency_ms": 9400,
+      "thread_pool_utilization_pct": 98.2,
+      "stripe_external_call_latency_ms": 8900
+    },
+    "deployment_context": {
+      "last_deployment": "v2.11.4",
+      "deployed_at": "2026-06-18T16:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Downstream payment gateway API experienced regional degradation; payment-api lacked HTTP timeout and circuit breaker protection on outbound webhook calls.",
+    "actions_attempted": [
+      {
+        "action_type": "SCALE_POD_REPLICAS",
+        "parameters": {"replicas": 15},
+        "outcome": "failed",
+        "reason": "New pods immediately consumed all worker threads waiting on stalled outbound HTTP calls, worsening database connection limits."
+      },
+      {
+        "action_type": "ENABLE_CIRCUIT_BREAKER",
+        "parameters": {"timeout_ms": 2500, "error_threshold_pct": 50, "fallback": "async_queue"},
+        "outcome": "successful",
+        "reason": "Tripped circuit breaker to fail fast and divert pending payment intents to asynchronous retry queues."
+      }
+    ],
+    "successful_actions": ["ENABLE_CIRCUIT_BREAKER"],
+    "failed_actions": ["SCALE_POD_REPLICAS"],
+    "resolution_time_minutes": 34,
+    "final_outcome": "Latency restored to 210ms; async workers drained the 14,000 pending payments safely as Stripe recovered.",
+    "engineer_feedback": {
+      "engineer": "eng_marcus",
+      "rating": "5_stars",
+      "comment": "Horizontal scaling does not fix downstream blocking calls. Circuit breaking and async fallback was the key."
+    },
+    "lessons_learned": [
+      "Always configure client-side HTTP timeouts and circuit breakers for external third-party integrations.",
+      "Decouple payment authorization confirmations from synchronous HTTP request threads."
+    ]
+  },
+  {
+    "incident_id": "INC-H103",
+    "timestamp": "2026-07-02T18:45:12Z",
+    "service": "order-service",
+    "title": "Poison Pill Kafka Event Crashing Consumer Group Loop",
+    "severity": "high",
+    "status": "resolved",
+    "symptoms": [
+      "Order processing came to a complete halt",
+      "Kafka consumer group lag growing at 1,400 messages per second",
+      "CrashLoopBackOff on all 8 order-consumer pods"
+    ],
+    "alerts": [
+      "KafkaConsumerLagHigh (>10000)",
+      "KubernetesPodCrashLooping (order-consumer)"
+    ],
+    "relevant_metrics": {
+      "consumer_lag_records": 48200,
+      "pod_restart_count": 24,
+      "orders_processed_per_sec": 0
+    },
+    "deployment_context": {
+      "last_deployment": "v4.1.0",
+      "deployed_at": "2026-07-01T14:30:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Malformed JSON payload with unexpected null `customer_id` caused unhandled NullPointerException in deserialize hook.",
+    "actions_attempted": [
+      {
+        "action_type": "RESTART_SERVICE",
+        "parameters": {"service": "order-service"},
+        "outcome": "failed",
+        "reason": "Restarted pods reconnected to Kafka and immediately crashed on the same uncommitted malformed message offset."
+      },
+      {
+        "action_type": "ROUTE_DEAD_LETTER_QUEUE",
+        "parameters": {"topic": "orders.v1", "partition": 3, "offset": 819204, "dlq_topic": "orders.dlq"},
+        "outcome": "successful",
+        "reason": "Diverted poison message to dead-letter queue and advanced consumer offset, unblocking the entire queue."
+      }
+    ],
+    "successful_actions": ["ROUTE_DEAD_LETTER_QUEUE"],
+    "failed_actions": ["RESTART_SERVICE"],
+    "resolution_time_minutes": 19,
+    "final_outcome": "Lag drained from 48,200 to 0 in 6 minutes; poison message quarantined for bugfix.",
+    "engineer_feedback": {
+      "engineer": "eng_david",
+      "rating": "5_stars",
+      "comment": "Restarting a crashing Kafka consumer is futile when there is a poison pill. DLQ routing fixed it instantly."
+    },
+    "lessons_learned": [
+      "Kafka consumers must have automatic deserialization exception handlers and DLQ routing.",
+      "Never loop infinitely on unparseable message payloads."
+    ]
+  },
+  {
+    "incident_id": "INC-H104",
+    "timestamp": "2026-07-10T11:04:22Z",
+    "service": "api-gateway",
+    "title": "Corrupted Lua Routing Script Deployment",
+    "severity": "critical",
+    "status": "resolved",
+    "symptoms": [
+      "502 Bad Gateway returned for 100% of incoming public requests",
+      "API Gateway ingress proxy failing configuration reload",
+      "Global traffic cliff drop"
+    ],
+    "alerts": [
+      "ApiGateway502Spike (>90%)",
+      "TrafficCliffDetected (-95%)"
+    ],
+    "relevant_metrics": {
+      "status_502_rate_pct": 99.8,
+      "active_requests": 20,
+      "healthy_upstreams_pct": 0
+    },
+    "deployment_context": {
+      "last_deployment": "v2.14.0-gw",
+      "deployed_at": "2026-07-10T11:01:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Syntax error in custom Lua auth token extraction plugin deployed in v2.14.0-gw prevented NGINX worker startup.",
+    "actions_attempted": [
+      {
+        "action_type": "ROLLBACK_DEPLOYMENT",
+        "parameters": {"target_version": "v2.13.9-gw"},
+        "outcome": "successful",
+        "reason": "Rolled back to previous known stable gateway configuration within 2 minutes."
+      }
+    ],
+    "successful_actions": ["ROLLBACK_DEPLOYMENT"],
+    "failed_actions": [],
+    "resolution_time_minutes": 6,
+    "final_outcome": "All public traffic restored with 0 errors immediately upon rollback completion.",
+    "engineer_feedback": {
+      "engineer": "sre_elena",
+      "rating": "5_stars",
+      "comment": "Clear regression immediately following release. Immediate rollback was flawless."
+    },
+    "lessons_learned": [
+      "Gateways must run syntax validation (`nginx -t`) in CI before publishing image artifacts.",
+      "Use canary traffic routing for gateway infrastructure changes."
+    ]
+  },
+  {
+    "incident_id": "INC-H105",
+    "timestamp": "2026-07-18T16:20:00Z",
+    "service": "user-service",
+    "title": "Missing Database Index on User Authentication Email Field",
+    "severity": "high",
+    "status": "resolved",
+    "symptoms": [
+      "User login endpoint response time degraded to 4,200ms",
+      "PostgreSQL CPU pegged at 100% due to sequential table scans on `users` table",
+      "Customer login timeout rate reached 22%"
+    ],
+    "alerts": [
+      "UserServiceLoginLatencyHigh (>3000ms)",
+      "DatabaseCpuUtilizationCritical (>95%)"
+    ],
+    "relevant_metrics": {
+      "db_cpu_pct": 100.0,
+      "login_p99_latency_ms": 4200,
+      "seq_scans_per_min": 850
+    },
+    "deployment_context": {
+      "last_deployment": "v1.9.0",
+      "deployed_at": "2026-07-17T20:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Migration script dropped composite index `idx_users_email_tenant` during schema refactoring, forcing 8.5M row sequential scans on every login.",
+    "actions_attempted": [
+      {
+        "action_type": "RESTART_SERVICE",
+        "parameters": {"service": "user-service"},
+        "outcome": "failed",
+        "reason": "Restarting application pods did not change database query execution plans; DB CPU remained at 100% instantly."
+      },
+      {
+        "action_type": "CREATE_INDEX_CONCURRENTLY",
+        "parameters": {"table": "users", "columns": ["email", "tenant_id"], "index_name": "idx_users_email_tenant_concurrent"},
+        "outcome": "successful",
+        "reason": "Created missing b-tree index concurrently without table write locks; index scan dropped query execution from 3,800ms to 2.4ms."
+      }
+    ],
+    "successful_actions": ["CREATE_INDEX_CONCURRENTLY"],
+    "failed_actions": ["RESTART_SERVICE"],
+    "resolution_time_minutes": 22,
+    "final_outcome": "DB CPU dropped from 100% to 11%; login latency normalized to 35ms.",
+    "engineer_feedback": {
+      "engineer": "sre_alex",
+      "rating": "5_stars",
+      "comment": "Restarting app was ineffective against missing DB index. Concurrent index creation resolved it seamlessly."
+    },
+    "lessons_learned": [
+      "Add automated query plan regression tests in CI to detect table scans before migrations merge.",
+      "Always use `CONCURRENTLY` for production PostgreSQL indexing to prevent lock contention."
+    ]
+  },
+  {
+    "incident_id": "INC-H106",
+    "timestamp": "2026-07-25T13:40:00Z",
+    "service": "notification-service",
+    "title": "SendGrid Email API Rate Limit Quota Exhaustion",
+    "severity": "medium",
+    "status": "resolved",
+    "symptoms": [
+      "Order confirmation emails delayed by 45 minutes",
+      "HTTP 429 Too Many Requests returned from primary email provider API",
+      "Redis notification queue backed up to 25,000 tasks"
+    ],
+    "alerts": [
+      "NotificationQueueDelayHigh (>30m)",
+      "VendorRateLimit429 (SendGrid)"
+    ],
+    "relevant_metrics": {
+      "queue_size": 25400,
+      "provider_429_count": 820,
+      "delivery_rate_per_sec": 2
+    },
+    "deployment_context": {
+      "last_deployment": "v2.4.1",
+      "deployed_at": "2026-07-20T12:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Promotional email blast shared the same vendor API key and hourly rate quota as transactional order receipts.",
+    "actions_attempted": [
+      {
+        "action_type": "FLUSH_REDIS_QUEUE",
+        "parameters": {"queue": "notifications:email"},
+        "outcome": "failed",
+        "reason": "Attempting to clear queue resulted in loss of 18,000 customer transactional order receipts."
+      },
+      {
+        "action_type": "SWITCH_SMS_FALLBACK_PROVIDER",
+        "parameters": {"provider": "aws_ses", "split_traffic_pct": 100},
+        "outcome": "successful",
+        "reason": "Switched outbound email gateway to secondary AWS SES provider with independent rate limits."
+      }
+    ],
+    "successful_actions": ["SWITCH_SMS_FALLBACK_PROVIDER"],
+    "failed_actions": ["FLUSH_REDIS_QUEUE"],
+    "resolution_time_minutes": 41,
+    "final_outcome": "Queue drained within 12 minutes on AWS SES; 100% of receipts delivered.",
+    "engineer_feedback": {
+      "engineer": "eng_sarah",
+      "rating": "4_stars",
+      "comment": "Flushing queues is dangerous. Multi-vendor failover route is the right mitigation."
+    },
+    "lessons_learned": [
+      "Isolate transactional email infrastructure from marketing campaigns with dedicated quotas.",
+      "Maintain active-active secondary email providers."
+    ]
+  },
+  {
+    "incident_id": "INC-H107",
+    "timestamp": "2026-08-01T20:10:00Z",
+    "service": "order-service",
+    "title": "Deadlock in Inventory Reservation Transactions",
+    "severity": "high",
+    "status": "resolved",
+    "symptoms": [
+      "PostgreSQL error `deadlock detected` occurring 250 times per minute",
+      "Checkout order rollback rate spiked to 42%",
+      "Inventory table locked up across concurrent basket purchases"
+    ],
+    "alerts": [
+      "PostgresDeadlockRateHigh (>50/min)",
+      "OrderTransactionFailureRate (>25%)"
+    ],
+    "relevant_metrics": {
+      "deadlock_events_per_min": 260,
+      "transaction_rollback_pct": 42.1,
+      "p99_checkout_latency_ms": 6800
+    },
+    "deployment_context": {
+      "last_deployment": "v4.2.0",
+      "deployed_at": "2026-08-01T15:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Concurrent checkout requests reserved multiple inventory items in arbitrary order, causing circular row lock deadlocks in Postgres.",
+    "actions_attempted": [
+      {
+        "action_type": "SCALE_POD_REPLICAS",
+        "parameters": {"replicas": 12},
+        "outcome": "failed",
+        "reason": "Increasing application replicas intensified concurrency and quadrupled deadlock frequency."
+      },
+      {
+        "action_type": "SORT_INVENTORY_ACQUISITION_ORDER",
+        "parameters": {"sort_by": "sku_id", "order": "asc"},
+        "outcome": "successful",
+        "reason": "Enforced strict ascending SKU ID lock acquisition order across all transactions, eliminating circular lock dependencies."
+      }
+    ],
+    "successful_actions": ["SORT_INVENTORY_ACQUISITION_ORDER"],
+    "failed_actions": ["SCALE_POD_REPLICAS"],
+    "resolution_time_minutes": 38,
+    "final_outcome": "Deadlocks dropped to 0; checkout rollback rate normalized to <0.1%.",
+    "engineer_feedback": {
+      "engineer": "eng_marcus",
+      "rating": "5_stars",
+      "comment": "Scaling pods worsened the deadlock. Deterministic row sorting completely eradicated the deadlock condition."
+    },
+    "lessons_learned": [
+      "Always acquire row locks in deterministic order (e.g. sorted SKU IDs) when locking multiple rows.",
+      "Do not scale concurrency when experiencing database deadlocks."
+    ]
+  },
+  {
+    "incident_id": "INC-H108",
+    "timestamp": "2026-08-08T04:30:15Z",
+    "service": "payment-api",
+    "title": "Memory Leak in PyCryptodome Cipher Context",
+    "severity": "critical",
+    "status": "resolved",
+    "symptoms": [
+      "Resident Memory (RSS) grew steadily from 400MB to 7.8GB over 6 hours",
+      "Linux kernel OOM killer terminating payment pods sequentially",
+      "Intermittent 503 errors during pod restarts"
+    ],
+    "alerts": [
+      "ContainerMemoryUtilizationCritical (>90%)",
+      "PodOomKilled (payment-api)"
+    ],
+    "relevant_metrics": {
+      "memory_rss_bytes": 8100000000,
+      "oom_kill_count": 14,
+      "gc_uncollectable_objects": 420000
+    },
+    "deployment_context": {
+      "last_deployment": "v2.12.0",
+      "deployed_at": "2026-08-07T22:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "AES-GCM encryption contexts for payment card tokens were retained in a global caching dictionary without size eviction.",
+    "actions_attempted": [
+      {
+        "action_type": "INCREASE_POD_MEMORY_LIMIT",
+        "parameters": {"memory_limit": "16Gi"},
+        "outcome": "failed",
+        "reason": "Doubling memory limit only delayed the inevitable OOM crash by 4 hours without fixing the unbounded growth."
+      },
+      {
+        "action_type": "DEPLOY_HOTFIX_CIPHER_RECYCLE",
+        "parameters": {"patch_version": "v2.12.1", "enable_lru_cache": true, "max_entries": 1000},
+        "outcome": "successful",
+        "reason": "Replaced unbounded cipher dictionary with LRU cache and explicit context manager garbage disposal."
+      }
+    ],
+    "successful_actions": ["DEPLOY_HOTFIX_CIPHER_RECYCLE"],
+    "failed_actions": ["INCREASE_POD_MEMORY_LIMIT"],
+    "resolution_time_minutes": 52,
+    "final_outcome": "Memory stabilized flat at 420MB; zero OOM kills across 72 hours.",
+    "engineer_feedback": {
+      "engineer": "sre_alex",
+      "rating": "5_stars",
+      "comment": "Increasing memory limits on a memory leak is a classic anti-pattern. Hotfix with LRU eviction fixed the root cause."
+    },
+    "lessons_learned": [
+      "Never store cryptographic session contexts in unbounded global maps.",
+      "Profile memory allocation in load tests before major releases."
+    ]
+  },
+  {
+    "incident_id": "INC-H109",
+    "timestamp": "2026-08-14T08:00:00Z",
+    "service": "api-gateway",
+    "title": "Expired Wildcard SSL/TLS Certificate on Ingress",
+    "severity": "critical",
+    "status": "resolved",
+    "symptoms": [
+      "All mobile and web clients throwing `SSL_ERROR_EXPIRED_CERT_DATE`",
+      "Public traffic dropped by 98% globally within 60 seconds",
+      "Ingress terminating TLS handshakes"
+    ],
+    "alerts": [
+      "TlsCertificateExpired (api.incidentmind.io)",
+      "GlobalIngressTrafficDrop (-98%)"
+    ],
+    "relevant_metrics": {
+      "tls_handshake_failure_rate_pct": 98.4,
+      "active_connections": 12,
+      "cert_days_remaining": 0
+    },
+    "deployment_context": {
+      "last_deployment": "v2.14.2-gw",
+      "deployed_at": "2026-08-01T10:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Automated ACME cert-manager renewal webhook secret rotation failed due to expired cloud IAM token.",
+    "actions_attempted": [
+      {
+        "action_type": "RELOAD_GATEWAY_CONFIG",
+        "parameters": {"signal": "HUP"},
+        "outcome": "failed",
+        "reason": "Reloading gateway reloaded the expired certificate from the unchanged Kubernetes secret."
+      },
+      {
+        "action_type": "ROTATE_TLS_CERTIFICATE_SECRET",
+        "parameters": {"secret_name": "wildcard-tls-prod", "vault_path": "certs/2026/wildcard"},
+        "outcome": "successful",
+        "reason": "Injected freshly signed certificate from backup Vault store and reloaded Ingress TLS controller."
+      }
+    ],
+    "successful_actions": ["ROTATE_TLS_CERTIFICATE_SECRET"],
+    "failed_actions": ["RELOAD_GATEWAY_CONFIG"],
+    "resolution_time_minutes": 14,
+    "final_outcome": "100% of TLS handshakes succeeded; traffic fully restored in 90 seconds.",
+    "engineer_feedback": {
+      "engineer": "sre_elena",
+      "rating": "5_stars",
+      "comment": "Direct certificate rotation from Vault restored service immediately."
+    },
+    "lessons_learned": [
+      "Implement multi-stage certificate expiry alerts at 30, 14, and 7 days.",
+      "Monitor cert-manager IAM credentials health continuously."
+    ]
+  },
+  {
+    "incident_id": "INC-H110",
+    "timestamp": "2026-08-20T17:15:30Z",
+    "service": "user-service",
+    "title": "Redis Session Cache Eviction Thundering Herd",
+    "severity": "high",
+    "status": "resolved",
+    "symptoms": [
+      "Redis memory reached 100% `maxmemory` threshold",
+      "Cache eviction rate spiked to 1,800 keys per second",
+      "All session validation queries fell through to PostgreSQL user table causing DB latency spike"
+    ],
+    "alerts": [
+      "RedisMemoryMaxReached (>98%)",
+      "DatabaseQueryQueueLengthSpike (>50)"
+    ],
+    "relevant_metrics": {
+      "redis_used_memory_bytes": 16000000000,
+      "cache_miss_rate_pct": 68.2,
+      "db_user_query_latency_ms": 2800
+    },
+    "deployment_context": {
+      "last_deployment": "v1.9.3",
+      "deployed_at": "2026-08-15T09:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Session tokens created without TTL combined with sudden surge in active users caused Redis volatile-lru thrashing.",
+    "actions_attempted": [
+      {
+        "action_type": "FLUSH_ALL_REDIS",
+        "parameters": {"async": false},
+        "outcome": "failed",
+        "reason": "Flushing the entire Redis cache destroyed remaining valid sessions, causing instant 100% database lockup."
+      },
+      {
+        "action_type": "EXPAND_REDIS_CLUSTER_MEMORY",
+        "parameters": {"maxmemory_gb": 32, "maxmemory_policy": "volatile-ttl"},
+        "outcome": "successful",
+        "reason": "Scaled Redis cluster capacity to 32GB and switched eviction policy to volatile-ttl with 7-day default cap."
+      }
+    ],
+    "successful_actions": ["EXPAND_REDIS_CLUSTER_MEMORY"],
+    "failed_actions": ["FLUSH_ALL_REDIS"],
+    "resolution_time_minutes": 47,
+    "final_outcome": "Cache hit ratio restored to 99.4%; DB load normalized instantly.",
+    "engineer_feedback": {
+      "engineer": "eng_sarah",
+      "rating": "4_stars",
+      "comment": "Flushing Redis under load causes a catastrophic database stampede. Memory expansion and TTL policy change was the proper fix."
+    },
+    "lessons_learned": [
+      "Do NOT run `FLUSHALL` on production session caches during high load.",
+      "Always configure explicit TTL on session keys at generation time."
+    ]
+  },
+  {
+    "incident_id": "INC-H111",
+    "timestamp": "2026-08-28T02:00:00Z",
+    "service": "database",
+    "title": "Unvacuumed Autovacuum Freeze Lock on High-Write Orders Table",
+    "severity": "critical",
+    "status": "resolved",
+    "symptoms": [
+      "PostgreSQL database entered emergency read-only mode with transaction ID wraparound warning",
+      "All write transactions failing with error `database is in emergency read-only mode`",
+      "Orders and payments rejected globally"
+    ],
+    "alerts": [
+      "PostgresTxidWraparoundImminent (>90%)",
+      "DatabaseReadOnlyModeActivated"
+    ],
+    "relevant_metrics": {
+      "oldest_current_xid_age": 2080000000,
+      "dead_tuples_count": 48000000,
+      "write_iops": 0
+    },
+    "deployment_context": {
+      "last_deployment": "v3.9.1",
+      "deployed_at": "2026-08-20T10:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Default autovacuum cost limit throttled freeze vacuuming on the 50M-row `order_events` table during heavy continuous write traffic.",
+    "actions_attempted": [
+      {
+        "action_type": "RESTART_DATABASE",
+        "parameters": {"graceful": true},
+        "outcome": "failed",
+        "reason": "Postgres refused read-write connections upon restart because txid wraparound threshold remained exceeded."
+      },
+      {
+        "action_type": "RUN_TARGETED_VACUUM_FREEZE",
+        "parameters": {"table": "order_events", "maintenance_work_mem": "2GB", "vacuum_cost_limit": 10000},
+        "outcome": "successful",
+        "reason": "Executed aggressive targeted vacuum freeze with 2GB maintenance memory, freezing 48M tuples in 18 minutes."
+      }
+    ],
+    "successful_actions": ["RUN_TARGETED_VACUUM_FREEZE"],
+    "failed_actions": ["RESTART_DATABASE"],
+    "resolution_time_minutes": 58,
+    "final_outcome": "Database exited emergency read-only state; normal writes resumed immediately.",
+    "engineer_feedback": {
+      "engineer": "sre_alex",
+      "rating": "5_stars",
+      "comment": "Restarting the DB does not resolve txid wraparound. Increasing autovacuum maintenance memory and aggressive freeze is required."
+    },
+    "lessons_learned": [
+      "Tune `autovacuum_freeze_max_age` and `autovacuum_vacuum_cost_limit` on high-throughput tables.",
+      "Monitor transaction ID age with alerts at 50% and 75% thresholds."
+    ]
+  },
+  {
+    "incident_id": "INC-H112",
+    "timestamp": "2026-09-02T19:25:00Z",
+    "service": "notification-service",
+    "title": "RabbitMQ Unacknowledged Queue OOM Spike",
+    "severity": "high",
+    "status": "resolved",
+    "symptoms": [
+      "RabbitMQ high memory alarm triggered at 95% watermark",
+      "Producers blocked from publishing push notification tasks",
+      "RabbitMQ broker memory thrashing"
+    ],
+    "alerts": [
+      "RabbitMqMemoryAlarmTriggered (>95%)",
+      "NotificationPublishersBlocked"
+    ],
+    "relevant_metrics": {
+      "rabbitmq_memory_bytes": 15200000000,
+      "unacked_messages": 320000,
+      "publish_rate_per_sec": 0
+    },
+    "deployment_context": {
+      "last_deployment": "v2.5.0",
+      "deployed_at": "2026-09-01T11:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "New notification worker fleet initialized with unlimited basic_qos prefetch, pulling 320,000 unacknowledged messages into node memory.",
+    "actions_attempted": [
+      {
+        "action_type": "RESTART_RABBITMQ_BROKER",
+        "parameters": {"node": "rabbit-prod-01"},
+        "outcome": "failed",
+        "reason": "Broker reloaded unacked persistent messages from disk on startup and immediately re-triggered the high memory alarm."
+      },
+      {
+        "action_type": "SET_CONSUMER_PREFETCH_LIMIT",
+        "parameters": {"prefetch_count": 50, "scale_workers": 20},
+        "outcome": "successful",
+        "reason": "Configured strict prefetch limit of 50 per consumer channel and scaled active worker fleet to drain queue."
+      }
+    ],
+    "successful_actions": ["SET_CONSUMER_PREFETCH_LIMIT"],
+    "failed_actions": ["RESTART_RABBITMQ_BROKER"],
+    "resolution_time_minutes": 29,
+    "final_outcome": "Unacked messages dropped from 320k to 1,200; broker memory normalized to 35%.",
+    "engineer_feedback": {
+      "engineer": "eng_david",
+      "rating": "5_stars",
+      "comment": "Restarting the broker just reloads the messages. Setting proper consumer channel prefetch resolved it permanently."
+    },
+    "lessons_learned": [
+      "Always set `basic_qos(prefetch_count=N)` on message consumers.",
+      "Never leave consumer message prefetch unbounded in production."
+    ]
+  },
+  {
+    "incident_id": "INC-H113",
+    "timestamp": "2026-09-05T14:10:00Z",
+    "service": "payment-api",
+    "title": "Idempotency Key Collisions in Duplicate Payment Protection",
+    "severity": "high",
+    "status": "resolved",
+    "symptoms": [
+      "Customers receiving `409 Conflict - Duplicate Payment Request` on first-time checkout attempts",
+      "Payment conversion rate dropped by 24%",
+      "Customer support escalation surge"
+    ],
+    "alerts": [
+      "Payment409ConflictSpike (>15%)",
+      "CheckoutConversionDrop (-20%)"
+    ],
+    "relevant_metrics": {
+      "http_409_rate_pct": 24.2,
+      "successful_payments_per_min": 180,
+      "retry_conflicts": 1450
+    },
+    "deployment_context": {
+      "last_deployment": "v2.13.0",
+      "deployed_at": "2026-09-05T13:50:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Release v2.13.0 introduced a bug where the idempotency key hashing algorithm omitted the user session ID, causing collision across distinct users purchasing at the same second.",
+    "actions_attempted": [
+      {
+        "action_type": "ROLLBACK_DEPLOYMENT",
+        "parameters": {"target_version": "v2.12.2"},
+        "outcome": "successful",
+        "reason": "Immediate rollback restored the correct composite hashing algorithm including user ID and timestamp."
+      }
+    ],
+    "successful_actions": ["ROLLBACK_DEPLOYMENT"],
+    "failed_actions": [],
+    "resolution_time_minutes": 11,
+    "final_outcome": "409 Conflict rate dropped back to 0.02% immediately upon rollback completion.",
+    "engineer_feedback": {
+      "engineer": "eng_marcus",
+      "rating": "5_stars",
+      "comment": "Clear release regression. Rollback executed in 3 minutes restored normal payment flow."
+    },
+    "lessons_learned": [
+      "Validate idempotency key uniqueness and collision resistance with property-based unit tests.",
+      "Include user ID, cart ID, and random entropy in client-side idempotency keys."
+    ]
+  },
+  {
+    "incident_id": "INC-H114",
+    "timestamp": "2026-09-09T21:40:00Z",
+    "service": "order-service",
+    "title": "Stale Read Replicas during Flash Sale Inventory Check",
+    "severity": "critical",
+    "status": "resolved",
+    "symptoms": [
+      "Overselling of limited inventory products by 350 units",
+      "Replication lag on PostgreSQL read replicas increased to 42 seconds",
+      "Cart checkout allowing out-of-stock purchases"
+    ],
+    "alerts": [
+      "PostgresReplicationLagHigh (>30s)",
+      "InventoryDiscrepancyDetected"
+    ],
+    "relevant_metrics": {
+      "replication_lag_seconds": 42.5,
+      "oversold_items_count": 350,
+      "replica_read_qps": 8400
+    },
+    "deployment_context": {
+      "last_deployment": "v4.2.4",
+      "deployed_at": "2026-09-05T10:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Order service routed critical stock availability checks to async read replicas that were lagging behind during flash sale write spikes.",
+    "actions_attempted": [
+      {
+        "action_type": "RESTART_REPLICA_INSTANCES",
+        "parameters": {"replicas": ["pg-replica-01", "pg-replica-02"]},
+        "outcome": "failed",
+        "reason": "Restarting replica nodes dropped WAL catchup progress, widening replication lag to over 3 minutes."
+      },
+      {
+        "action_type": "ROUTE_CRITICAL_READS_TO_PRIMARY",
+        "parameters": {"services": ["inventory_check", "stock_reservation"], "use_primary": true},
+        "outcome": "successful",
+        "reason": "Forced all transactional stock checks directly to primary PostgreSQL database with linearizable consistency."
+      }
+    ],
+    "successful_actions": ["ROUTE_CRITICAL_READS_TO_PRIMARY"],
+    "failed_actions": ["RESTART_REPLICA_INSTANCES"],
+    "resolution_time_minutes": 31,
+    "final_outcome": "Overselling stopped immediately; orders accurately reflected real-time warehouse inventory.",
+    "engineer_feedback": {
+      "engineer": "eng_sarah",
+      "rating": "5_stars",
+      "comment": "Never restart replicas during WAL catchup lag. Enforcing primary reads for critical inventory eliminated overselling."
+    },
+    "lessons_learned": [
+      "Never read volatile inventory state from asynchronous read replicas without lag SLA checks.",
+      "Use atomic conditional updates (`UPDATE stock SET qty = qty - 1 WHERE qty > 0`) on primary."
+    ]
+  },
+  {
+    "incident_id": "INC-H115",
+    "timestamp": "2026-09-12T10:05:00Z",
+    "service": "user-service",
+    "title": "Bcrypt CPU Starvation due to Increased Work Factor",
+    "severity": "high",
+    "status": "resolved",
+    "symptoms": [
+      "Login endpoint latency increased from 60ms to 2,800ms",
+      "CPU utilization reached 100% across all 12 user-service pods",
+      "Thread pool queues saturated with authentication requests"
+    ],
+    "alerts": [
+      "UserServiceCpuPegged (>95%)",
+      "LoginP99LatencyCritical (>2500ms)"
+    ],
+    "relevant_metrics": {
+      "pod_cpu_pct": 100.0,
+      "login_p99_latency_ms": 2850,
+      "bcrypt_hash_time_ms": 2400
+    },
+    "deployment_context": {
+      "last_deployment": "v1.9.5",
+      "deployed_at": "2026-09-10T14:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Environment ConfigMap update increased Bcrypt salt rounds from 10 to 15, multiplying CPU calculation time by 32x per login attempt.",
+    "actions_attempted": [
+      {
+        "action_type": "ROLLBACK_DEPLOYMENT",
+        "parameters": {"target_version": "v1.9.4"},
+        "outcome": "failed",
+        "reason": "Application code image was not the source of the issue; the external Kubernetes ConfigMap was still injected with work_factor=15."
+      },
+      {
+        "action_type": "UPDATE_CONFIGMAP_WORK_FACTOR",
+        "parameters": {"configmap": "user-service-config", "key": "BCRYPT_ROUNDS", "value": "10"},
+        "outcome": "successful",
+        "reason": "Corrected ConfigMap value back to 10 rounds and performed fast rolling reload of user-service pods."
+      }
+    ],
+    "successful_actions": ["UPDATE_CONFIGMAP_WORK_FACTOR"],
+    "failed_actions": ["ROLLBACK_DEPLOYMENT"],
+    "resolution_time_minutes": 26,
+    "final_outcome": "CPU utilization dropped from 100% to 14%; login latency returned to 55ms.",
+    "engineer_feedback": {
+      "engineer": "sre_alex",
+      "rating": "5_stars",
+      "comment": "Code rollback failed because the bug was in the injected ConfigMap. Changing ConfigMap value directly resolved the CPU starvation."
+    },
+    "lessons_learned": [
+      "Distinguish between image code revisions and external configuration map changes during root cause analysis.",
+      "Benchmark hashing cost factors on target hardware before changing security configs."
+    ]
+  },
+  {
+    "incident_id": "INC-H116",
+    "timestamp": "2026-09-15T15:30:00Z",
+    "service": "api-gateway",
+    "title": "DDoS Attack Triggering Global Rate Limiting on Legitimate Users",
+    "severity": "critical",
+    "status": "resolved",
+    "symptoms": [
+      "250,000 req/sec volumetric DDoS targeting `/api/v1/search`",
+      "API Gateway Redis rate-limiter cluster exhausted bandwidth",
+      "Legitimate authenticated customers blocked with 429 Too Many Requests"
+    ],
+    "alerts": [
+      "DdosAttackDetected (250k RPS)",
+      "ApiGateway429RateLimitSpike (>40%)"
+    ],
+    "relevant_metrics": {
+      "incoming_rps": 262000,
+      "legitimate_blocked_pct": 44.1,
+      "gateway_cpu_pct": 96.5
+    },
+    "deployment_context": {
+      "last_deployment": "v2.14.3-gw",
+      "deployed_at": "2026-09-01T10:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Volumetric botnet attack from distributed IP range bypassed local rate limits and flooded search endpoints.",
+    "actions_attempted": [
+      {
+        "action_type": "DISABLE_GLOBAL_RATE_LIMIT",
+        "parameters": {"service": "api-gateway"},
+        "outcome": "failed",
+        "reason": "Disabling rate limits allowed the full 250k RPS attack to hit downstream search services, crashing the Elasticsearch cluster instantly."
+      },
+      {
+        "action_type": "APPLY_IP_GEO_FILTER_AND_BOT_CHALLENGE",
+        "parameters": {"edge_provider": "cloudflare", "challenge_mode": "managed_challenge", "rate_threshold_per_ip": 100},
+        "outcome": "successful",
+        "reason": "Applied managed Javascript challenge and ASN rate limits at Cloudflare edge, mitigating 98.5% of bot traffic before reaching gateway."
+      }
+    ],
+    "successful_actions": ["APPLY_IP_GEO_FILTER_AND_BOT_CHALLENGE"],
+    "failed_actions": ["DISABLE_GLOBAL_RATE_LIMIT"],
+    "resolution_time_minutes": 36,
+    "final_outcome": "Malicious traffic dropped from 250k RPS to 800 RPS; legitimate customer error rate dropped to 0%.",
+    "engineer_feedback": {
+      "engineer": "sre_elena",
+      "rating": "5_stars",
+      "comment": "Never disable rate limiting during an ongoing DDoS. Push mitigation to the edge CDN."
+    },
+    "lessons_learned": [
+      "Never disable internal rate limiting protections during traffic floods.",
+      "Use edge CDN managed challenges and ASN blocklists for volumetric attack mitigation."
+    ]
+  },
+  {
+    "incident_id": "INC-H117",
+    "timestamp": "2026-09-18T05:12:00Z",
+    "service": "database",
+    "title": "Postgres WAL Disk Space Full on Primary Node",
+    "severity": "critical",
+    "status": "resolved",
+    "symptoms": [
+      "PostgreSQL primary crashed with `PANIC: could not write to file pg_wal: No space left on device`",
+      "Read and Write database availability dropped to 0%",
+      "Database container unable to start"
+    ],
+    "alerts": [
+      "DiskSpaceCritical (/var/lib/postgresql >99%)",
+      "PostgresServerDown"
+    ],
+    "relevant_metrics": {
+      "disk_free_bytes": 0,
+      "wal_directory_size_gb": 180,
+      "uptime_seconds": 0
+    },
+    "deployment_context": {
+      "last_deployment": "v3.9.2",
+      "deployed_at": "2026-09-10T12:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Inactive replication slot `pg_slot_analytics` held back WAL log segment archiving, accumulating 180GB of unpurged WAL files until disk filled.",
+    "actions_attempted": [
+      {
+        "action_type": "DELETE_DATA_FILES_MANUALLY",
+        "parameters": {"path": "/var/lib/postgresql/data/pg_wal/*"},
+        "outcome": "failed",
+        "reason": "Manually deleting WAL files corrupts database transactional integrity and breaks crash recovery (rejected by safety policy)."
+      },
+      {
+        "action_type": "EXPAND_EBS_VOLUME_SIZE",
+        "parameters": {"volume_id": "vol-0a8b9c", "new_size_gb": 500, "drop_inactive_slot": "pg_slot_analytics"},
+        "outcome": "successful",
+        "reason": "Expanded EBS volume from 200GB to 500GB online, started Postgres cleanly in recovery, and dropped stale replication slot."
+      }
+    ],
+    "successful_actions": ["EXPAND_EBS_VOLUME_SIZE"],
+    "failed_actions": ["DELETE_DATA_FILES_MANUALLY"],
+    "resolution_time_minutes": 21,
+    "final_outcome": "Postgres recovered from WAL cleanly; unreserved disk space stabilized at 68% free.",
+    "engineer_feedback": {
+      "engineer": "sre_alex",
+      "rating": "5_stars",
+      "comment": "Never delete WAL files manually. Expand the EBS volume, start the DB, and drop the stale replication slot."
+    },
+    "lessons_learned": [
+      "Monitor replication slot WAL retention lag and alert when inactive slots accumulate >10GB.",
+      "Use automated volume auto-scaling for database data and WAL partitions."
+    ]
+  },
+  {
+    "incident_id": "INC-H118",
+    "timestamp": "2026-09-21T12:45:00Z",
+    "service": "notification-service",
+    "title": "Firebase Cloud Messaging (FCM) HTTP/2 Socket Leak",
+    "severity": "high",
+    "status": "resolved",
+    "symptoms": [
+      "Push notifications failing with `OSError: [Errno 24] Too many open files`",
+      "Notification service file descriptor utilization reached 65,535 (100%)",
+      "Outgoing push notification delivery rate dropped to 0%"
+    ],
+    "alerts": [
+      "ProcessFileDescriptorsCritical (>95%)",
+      "PushNotificationDeliveryFailureSpike (>50%)"
+    ],
+    "relevant_metrics": {
+      "open_file_descriptors": 65535,
+      "max_file_descriptors": 65535,
+      "failed_push_count": 18200
+    },
+    "deployment_context": {
+      "last_deployment": "v2.5.2",
+      "deployed_at": "2026-09-20T16:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "FCM push client created a new HTTP/2 client session for every notification without closing underlying TCP socket connections.",
+    "actions_attempted": [
+      {
+        "action_type": "INCREASE_ULIMIT_NOFILE",
+        "parameters": {"limit": 1000000},
+        "outcome": "failed",
+        "reason": "Increasing OS descriptor limits only delayed the socket exhaustion by 3 hours without addressing the leak."
+      },
+      {
+        "action_type": "REFACTOR_HTTP2_CLIENT_SINGLETON",
+        "parameters": {"patch_version": "v2.5.3", "pool_size": 100, "reuse_sessions": true},
+        "outcome": "successful",
+        "reason": "Deployed patch maintaining a pooled singleton HTTP/2 connection manager across all worker threads."
+      }
+    ],
+    "successful_actions": ["REFACTOR_HTTP2_CLIENT_SINGLETON"],
+    "failed_actions": ["INCREASE_ULIMIT_NOFILE"],
+    "resolution_time_minutes": 43,
+    "final_outcome": "File descriptor usage stabilized under 120; 100% of push notifications delivered normally.",
+    "engineer_feedback": {
+      "engineer": "eng_david",
+      "rating": "5_stars",
+      "comment": "Increasing ulimit is a temporary bandaid. Pooling HTTP/2 client sessions as singletons resolved the leak."
+    },
+    "lessons_learned": [
+      "HTTP/2 and gRPC client instances must be managed as shared connection pools.",
+      "Monitor process open file descriptor metrics in staging load tests."
+    ]
+  },
+  {
+    "incident_id": "INC-H119",
+    "timestamp": "2026-09-24T18:00:00Z",
+    "service": "payment-api",
+    "title": "Circular Dependency Deadlock in Distributed Two-Phase Commit",
+    "severity": "critical",
+    "status": "resolved",
+    "symptoms": [
+      "Payment authorization holding row lock on Order while Order Service was waiting for Payment lock",
+      "100% of order checkouts timing out after 60s",
+      "Distributed transaction lock contention across microservices"
+    ],
+    "alerts": [
+      "DistributedLockTimeoutHigh (>80%)",
+      "OrderCheckoutTimeoutSpike (>90%)"
+    ],
+    "relevant_metrics": {
+      "active_distributed_locks": 1200,
+      "timed_out_transactions_per_min": 450,
+      "checkout_p99_ms": 60000
+    },
+    "deployment_context": {
+      "last_deployment": "v2.13.2",
+      "deployed_at": "2026-09-23T10:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Synchronous distributed two-phase commit protocol between Payment API and Order Service created circular lock waits under peak traffic.",
+    "actions_attempted": [
+      {
+        "action_type": "RESTART_ALL_SERVICES",
+        "parameters": {"services": ["payment-api", "order-service"]},
+        "outcome": "failed",
+        "reason": "Restarting all services cleared temporary lock states, but in-flight traffic immediately recreated the exact same circular deadlock within 30 seconds."
+      },
+      {
+        "action_type": "SWITCH_TO_SAGA_COMPENSATING_TRANSACTION",
+        "parameters": {"enable_saga": true, "disable_sync_2pc": true, "compensation_queue": "payments.compensate"},
+        "outcome": "successful",
+        "reason": "Switched checkout protocol to asynchronous Saga pattern with compensating rollback transactions, eliminating synchronous cross-service locking."
+      }
+    ],
+    "successful_actions": ["SWITCH_TO_SAGA_COMPENSATING_TRANSACTION"],
+    "failed_actions": ["RESTART_ALL_SERVICES"],
+    "resolution_time_minutes": 64,
+    "final_outcome": "Zero distributed lock timeouts; checkout latency dropped from 60,000ms to 280ms.",
+    "engineer_feedback": {
+      "engineer": "eng_marcus",
+      "rating": "5_stars",
+      "comment": "Restarting services did not solve distributed lock contention. Switching to Saga orchestration solved the problem fundamentally."
+    },
+    "lessons_learned": [
+      "Avoid synchronous two-phase commits across distributed microservices.",
+      "Implement Saga orchestration patterns with eventual consistency and compensating events."
+    ]
+  },
+  {
+    "incident_id": "INC-H120",
+    "timestamp": "2026-09-26T09:10:00Z",
+    "service": "order-service",
+    "title": "JVM Garbage Collection Pause Storm (Stop-The-World)",
+    "severity": "high",
+    "status": "resolved",
+    "symptoms": [
+      "Stop-the-world JVM GC pauses exceeding 14 seconds every 3 minutes",
+      "Kubernetes liveness probes failing due to unresponsiveness during full GC",
+      "Pod restarts and dropped HTTP requests during pauses"
+    ],
+    "alerts": [
+      "JvmGcPauseDurationCritical (>10000ms)",
+      "LivenessProbeFailure (order-service)"
+    ],
+    "relevant_metrics": {
+      "gc_pause_max_ms": 14200,
+      "heap_used_bytes": 7800000000,
+      "request_drop_pct": 18.5
+    },
+    "deployment_context": {
+      "last_deployment": "v4.3.0",
+      "deployed_at": "2026-09-25T14:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "G1GC collector with large heap struggled to clear short-lived JSON deserialization objects during batch order import.",
+    "actions_attempted": [
+      {
+        "action_type": "INCREASE_HEAP_SIZE",
+        "parameters": {"heap_max": "16GB"},
+        "outcome": "failed",
+        "reason": "Increasing heap from 8GB to 16GB resulted in even longer 35-second full GC pause times when collection finally ran."
+      },
+      {
+        "action_type": "SWITCH_GC_COLLECTOR_TO_ZGC",
+        "parameters": {"jvm_opts": "-XX:+UseZGC -XX:+ZGenerational -Xmx8g"},
+        "outcome": "successful",
+        "reason": "Switched to Generational ZGC concurrent garbage collector, reducing max stop-the-world pause from 14,200ms to 2.8ms."
+      }
+    ],
+    "successful_actions": ["SWITCH_GC_COLLECTOR_TO_ZGC"],
+    "failed_actions": ["INCREASE_HEAP_SIZE"],
+    "resolution_time_minutes": 39,
+    "final_outcome": "Max GC pause dropped to 2.8ms; zero liveness probe failures.",
+    "engineer_feedback": {
+      "engineer": "eng_sarah",
+      "rating": "5_stars",
+      "comment": "Increasing heap size made GC pauses worse. Generational ZGC reduced pauses from 14s to under 3ms."
+    },
+    "lessons_learned": [
+      "Increasing heap size increases GC pause times on non-concurrent collectors.",
+      "Use modern concurrent collectors like ZGC or Shenandoah for latency-sensitive services."
+    ]
+  },
+  {
+    "incident_id": "INC-H121",
+    "timestamp": "2026-09-27T11:20:00Z",
+    "service": "user-service",
+    "title": "JWT Token Signature Secret Key Inconsistency",
+    "severity": "high",
+    "status": "resolved",
+    "symptoms": [
+      "401 Unauthorized for 50% of authenticated user requests",
+      "Round-robin requests succeeding on Pod A but failing on Pod B",
+      "User session logout storm"
+    ],
+    "alerts": [
+      "UserService401UnauthorizedSpike (>30%)",
+      "AuthFailureInconsistency"
+    ],
+    "relevant_metrics": {
+      "http_401_rate_pct": 50.1,
+      "auth_success_pod_a_pct": 100.0,
+      "auth_success_pod_b_pct": 0.0
+    },
+    "deployment_context": {
+      "last_deployment": "v1.9.6",
+      "deployed_at": "2026-09-27T11:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "Rolling deployment injected new JWT secret key on updated pods while older pods still verified against previous secret, rejecting half of tokens.",
+    "actions_attempted": [
+      {
+        "action_type": "FLUSH_REDIS_SESSIONS",
+        "parameters": {"async": true},
+        "outcome": "failed",
+        "reason": "Flushing Redis did not fix stateless JWT signature verification differences across pod replicas."
+      },
+      {
+        "action_type": "SYNCHRONIZE_JWT_SECRET_ACROSS_PODS",
+        "parameters": {"key_version": "2026-v2", "allow_dual_verification": true},
+        "outcome": "successful",
+        "reason": "Enabled dual-secret verification support during rolling upgrade, allowing validation of both old and new signatures."
+      }
+    ],
+    "successful_actions": ["SYNCHRONIZE_JWT_SECRET_ACROSS_PODS"],
+    "failed_actions": ["FLUSH_REDIS_SESSIONS"],
+    "resolution_time_minutes": 17,
+    "final_outcome": "401 error rate dropped to 0.01%; all user sessions validated seamlessly.",
+    "engineer_feedback": {
+      "engineer": "sre_alex",
+      "rating": "5_stars",
+      "comment": "Stateless JWT signature secrets must support dual verification during key rotations. Redis flushing was irrelevant."
+    },
+    "lessons_learned": [
+      "Secret rotations for stateless tokens must support dual-key verification windows during deployments.",
+      "Do not flush caching layers for stateless cryptographic verification issues."
+    ]
+  },
+  {
+    "incident_id": "INC-H122",
+    "timestamp": "2026-09-28T08:15:00Z",
+    "service": "api-gateway",
+    "title": "Upstream DNS Resolution Timeout on Kubernetes Service Discovery",
+    "severity": "critical",
+    "status": "resolved",
+    "symptoms": [
+      "CoreDNS query drop rate reached 22%",
+      "API Gateway logging `upstream domain payment-api.default.svc cannot be resolved`",
+      "503 Service Unavailable returned to 20% of public traffic"
+    ],
+    "alerts": [
+      "CoreDnsQueryFailureHigh (>15%)",
+      "ApiGateway503Spike (>15%)"
+    ],
+    "relevant_metrics": {
+      "dns_lookup_latency_ms": 1800,
+      "dns_timeout_pct": 22.4,
+      "http_503_rate_pct": 19.8
+    },
+    "deployment_context": {
+      "last_deployment": "v2.14.4-gw",
+      "deployed_at": "2026-09-20T10:00:00Z",
+      "environment": "production"
+    },
+    "root_cause": "High-throughput API Gateway sent millions of DNS queries directly to centralized CoreDNS pods, overloading them with UDP socket packet drops.",
+    "actions_attempted": [
+      {
+        "action_type": "RESTART_API_GATEWAY",
+        "parameters": {"service": "api-gateway"},
+        "outcome": "failed",
+        "reason": "Restarting the gateway pods sent a burst of new DNS queries upon initialization, causing CoreDNS to drop even more packets."
+      },
+      {
+        "action_type": "ENABLE_NODELOCAL_DNSCACHE",
+        "parameters": {"daemonset": "node-local-dns", "cache_ttl_seconds": 30},
+        "outcome": "successful",
+        "reason": "Deployed NodeLocal DNSCache DaemonSet to cache DNS lookups locally on each Kubernetes node, reducing CoreDNS queries by 98%."
+      }
+    ],
+    "successful_actions": ["ENABLE_NODELOCAL_DNSCACHE"],
+    "failed_actions": ["RESTART_API_GATEWAY"],
+    "resolution_time_minutes": 27,
+    "final_outcome": "DNS lookup latency dropped from 1,800ms to 0.4ms; zero 503 errors.",
+    "engineer_feedback": {
+      "engineer": "sre_elena",
+      "rating": "5_stars",
+      "comment": "Restarting the gateway worsened CoreDNS socket starvation. NodeLocal DNSCache solved the root networking bottleneck."
+    },
+    "lessons_learned": [
+      "Deploy NodeLocal DNSCache DaemonSets for high-QPS Kubernetes gateway workloads.",
+      "Do not restart client applications when the underlying shared DNS infrastructure is saturated."
+    ]
+  }
+]

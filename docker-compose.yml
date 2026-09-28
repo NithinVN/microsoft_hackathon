@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: incidentmind-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-incidentmind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-incidentmind}
+      POSTGRES_DB: ${POSTGRES_DB:-incidentmind_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-incidentmind} -d ${POSTGRES_DB:-incidentmind_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: incidentmind-backend
+    environment:
+      - APP_ENV=production
+      - DEBUG=False
+      - HOST=0.0.0.0
+      - PORT=8000
+      - API_V1_PREFIX=/api/v1
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-incidentmind}:${POSTGRES_PASSWORD:-incidentmind}@postgres:5432/${POSTGRES_DB:-incidentmind_db}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-openai/gpt-oss-120b}
+      - HINDSIGHT_API_KEY=${HINDSIGHT_API_KEY}
+      - HINDSIGHT_WORKSPACE_ID=${HINDSIGHT_WORKSPACE_ID:-incidentmind-org}
+      - HINDSIGHT_API_URL=${HINDSIGHT_API_URL:-https://api.hindsight.cloud}
+      - ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000,http://localhost:80
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: incidentmind-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

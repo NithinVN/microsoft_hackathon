@@ -161,11 +161,40 @@ class EngineerFeedbackRead(BaseModel):
     submitted_at: datetime
 
 
+class ApprovalDecisionCreate(BaseModel):
+    engineer: str = Field(..., min_length=2, max_length=100)
+    action: str = Field(..., pattern="^(approve|reject|modify)$")
+    original_recommendation: str = Field(..., min_length=3, max_length=1000)
+    modified_recommendation: Optional[str] = Field(None, min_length=3, max_length=1000)
+    reason: str = Field(..., min_length=3, max_length=1500)
+    timestamp: Optional[datetime] = None
+
+
+class ApprovalDecisionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    incident_id: int
+    engineer: str
+    action: str
+    original_recommendation: str
+    modified_recommendation: Optional[str] = None
+    reason: str
+    timestamp: datetime
+    execution_result: Dict[str, Any] = Field(default_factory=dict)
+
+
 class PostmortemCreate(BaseModel):
     title: str = Field(..., min_length=3, max_length=255)
     duration_minutes: int = Field(default=0, ge=0)
     root_cause: str = Field(..., min_length=5)
     trigger_event: str = Field(default="")
+    what_happened: str = Field(default="")
+    what_worked: List[str] = Field(default_factory=list)
+    what_failed: List[str] = Field(default_factory=list)
+    why_it_failed: str = Field(default="")
+    engineer_corrections: List[str] = Field(default_factory=list)
+    lessons_learned: List[str] = Field(default_factory=list)
     corrective_actions: List[str] = Field(default_factory=list)
     timeline: List[Dict[str, Any]] = Field(default_factory=list)
     hindsight_retained: bool = Field(default=False)
@@ -181,6 +210,12 @@ class PostmortemRead(BaseModel):
     duration_minutes: int
     root_cause: str
     trigger_event: str
+    what_happened: str = ""
+    what_worked: List[str] = Field(default_factory=list)
+    what_failed: List[str] = Field(default_factory=list)
+    why_it_failed: str = ""
+    engineer_corrections: List[str] = Field(default_factory=list)
+    lessons_learned: List[str] = Field(default_factory=list)
     corrective_actions: List[str]
     timeline: List[Dict[str, Any]]
     hindsight_retained: bool

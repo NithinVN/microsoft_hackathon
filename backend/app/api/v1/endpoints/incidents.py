@@ -2,11 +2,15 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.agents.incident_memory_agent import assess_incident_memory
+from backend.app.agents.time_machine_agent import _failed_fix_warning_for_incident, build_time_machine_analysis
 from backend.app.db.session import get_db
 from backend.app.repositories.incident_repository import IncidentRepository
 from backend.app.schemas.incident import (
     ActionExecutionCreate,
     ActionExecutionRead,
+    ApprovalDecisionCreate,
+    ApprovalDecisionRead,
     DiagnosisCreate,
     DiagnosisRead,
     EngineerFeedbackCreate,
@@ -79,6 +83,37 @@ async def get_incident(
             detail=f"Incident '{incident_id}' not found.",
         )
     return IncidentRead.model_validate(incident)
+
+
+@router.get("/{incident_id}/memory")
+async def get_incident_memory(
+    incident_id: str,
+) -> dict:
+    """Return the Hindsight-based historical memory for an incident."""
+    return assess_incident_memory(incident_id)
+
+
+@router.get("/{incident_id}/time-machine")
+async def get_incident_time_machine(
+    incident_id: str,
+) -> dict:
+    """Return historical action comparison data for candidate remediation decisions."""
+    from backend.app.tools import get_incident_details
+
+    incident_data = get_incident_details({"incident_id": incident_id})
+    if not incident_data.get("ok"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Incident '{incident_id}' not found.")
+
+    incident = incident_data["data"]["incident"]
+    comparison = build_time_machine_analysis(incident_id)
+    warning = _failed_fix_warning_for_incident(incident_id)
+
+    return {
+        "incident_id": incident_id,
+        "service": incident.get("service"),
+        "historical_action_comparison": comparison,
+        "failed_fix_warning": warning,
+    }
 
 
 @router.patch("/{id}", response_model=IncidentRead)
@@ -186,6 +221,69 @@ async def store_engineer_feedback(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Incident {id} not found.")
     feedback = await repo.store_feedback(id, data)
     return EngineerFeedbackRead.model_validate(feedback)
+
+
+@router.post("/{id}/approval", response_model=ApprovalDecisionRead, status_code=status.HTTP_200_OK)
+async def record_approval_decision(
+    id: int,
+    data: ApprovalDecisionCreate,
+    db: AsyncSession = Depends(get_db),
+) -> ApprovalDecisionRead:
+    """Record the engineer decision, including simulate-only execution output and recovery status."""
+    repo = IncidentRepository(db)
+    incident = await repo.get_incident_by_id(id)
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Incident {id} not found.")
+
+    recommendation = data.modified_recommendation or data.original_recommendation
+    effective_action = data.action
+    execution_result = {
+        "mode": "simulated",
+        "action": effective_action,
+        "recovered": True,
+        "details": "Simulation-only workflow: no live command execution was performed.",
+        "before": {
+            "db_connections_pct": 98,
+            "error_rate_pct": 37,
+        },
+        "after": {
+            "db_connections_pct": 61,
+            "error_rate_pct": 2,
+        },
+        "status": "RECOVERED",
+    }
+
+    if data.action == "reject":
+        execution_result["recovered"] = False
+        execution_result["status"] = "REJECTED"
+        execution_result["details"] = "Action rejected by engineer; no live remediation was executed in this demo."
+    elif data.action == "modify":
+        execution_result["details"] = "Modified recommendation executed in simulation mode only; no live command execution was performed."
+
+    if data.action == "approve":
+        execution_result["details"] = "Approved remediation simulated successfully. The incident is marked recovered in this demo workflow."
+
+    if "database connection" in data.original_recommendation.lower() and "pool" in data.original_recommendation.lower():
+        execution_result["before"] = {"db_connections_pct": 98, "error_rate_pct": 37}
+        execution_result["after"] = {"db_connections_pct": 61, "error_rate_pct": 2}
+    elif "worker" in data.original_recommendation.lower() or "queue" in data.original_recommendation.lower():
+        execution_result["before"] = {"queue_backlog": 92, "error_rate_pct": 23}
+        execution_result["after"] = {"queue_backlog": 31, "error_rate_pct": 4}
+
+    payload = data.model_copy(update={"execution_result": execution_result})
+    saved = await repo.store_approval_decision(id, payload)
+    saved_dict = {
+        "id": saved.id,
+        "incident_id": saved.incident_id,
+        "engineer": saved.engineer,
+        "action": saved.action,
+        "original_recommendation": saved.original_recommendation,
+        "modified_recommendation": saved.modified_recommendation,
+        "reason": saved.reason,
+        "timestamp": saved.timestamp,
+        "execution_result": execution_result,
+    }
+    return ApprovalDecisionRead.model_validate(saved_dict)
 
 
 @router.post("/{id}/postmortem", response_model=PostmortemRead, status_code=status.HTTP_201_CREATED)

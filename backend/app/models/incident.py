@@ -121,6 +121,9 @@ class Incident(Base):
     feedbacks: Mapped[List["EngineerFeedback"]] = relationship(
         "EngineerFeedback", back_populates="incident", cascade="all, delete-orphan"
     )
+    approvals: Mapped[List["ApprovalDecision"]] = relationship(
+        "ApprovalDecision", back_populates="incident", cascade="all, delete-orphan"
+    )
     postmortem: Mapped[Optional["Postmortem"]] = relationship(
         "Postmortem", back_populates="incident", cascade="all, delete-orphan", uselist=False
     )

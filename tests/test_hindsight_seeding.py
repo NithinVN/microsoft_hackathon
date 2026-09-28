@@ -16,7 +16,21 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from backend.app.memory.hindsight_service import HindsightService
-from scripts.seed_hindsight import load_historical_incidents
+from scripts.seed_hindsight import load_historical_incidents, local_recall_incidents
+
+
+def test_local_recall_matches_expected_incidents():
+    """Verifies that local recall can surface matching historical incidents from the dataset without a live Hindsight API."""
+    incidents = load_historical_incidents()
+    results = local_recall_incidents("stripe webhook latency worker thread pool exhaustion", service="payment-api", limit=3)
+
+    assert len(results) >= 1
+    assert any(item["service"] == "payment-api" for item in results)
+    assert any(item["incident_id"] == "INC-H102" for item in results)
+
+    db_results = local_recall_incidents("active connections exhausted max_connections gateway timeout", service="database", limit=3)
+    assert len(db_results) >= 1
+    assert any(item["incident_id"] == "INC-H101" for item in db_results)
 
 
 def test_historical_dataset_schema_and_diversity():

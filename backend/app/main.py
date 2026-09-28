@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from backend.app.api.v1.router import api_router
 from backend.app.core.config import settings
 from backend.app.core.logging import logger
+from backend.app.db.session import init_db
 
 
 @asynccontextmanager
@@ -16,6 +17,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Environment: %s | Debug: %s", settings.APP_ENV, settings.DEBUG)
     logger.info("Active LLM Model Target: %s", settings.GROQ_MODEL)
     logger.info("Hindsight Endpoint Target: %s", settings.HINDSIGHT_API_URL)
+    await init_db()
     yield
     logger.info("Shutting down IncidentMind backend service...")
 

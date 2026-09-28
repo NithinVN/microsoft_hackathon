@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -42,6 +42,24 @@ class RemediationAction(Base):
     __table_args__ = (
         Index("ix_remediation_incident_rec", "incident_id", "is_recommended"),
     )
+
+
+class ApprovalDecision(Base):
+    """Structured human approval/reject/modify record for an incident recommendation."""
+
+    __tablename__ = "approval_decisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    incident_id: Mapped[int] = mapped_column(Integer, ForeignKey("incidents.id", ondelete="CASCADE"), index=True, nullable=False)
+    engineer: Mapped[str] = mapped_column(String(100), nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    original_recommendation: Mapped[str] = mapped_column(Text, nullable=False)
+    modified_recommendation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    execution_result: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+
+    incident: Mapped["Incident"] = relationship("Incident", back_populates="approvals")
 
 
 class ActionExecution(Base):

@@ -42,6 +42,83 @@ def load_historical_incidents() -> List[Dict[str, Any]]:
     return incidents
 
 
+def _incident_search_text(incident: Dict[str, Any]) -> str:
+    """Build a normalized searchable text blob for a historical incident."""
+    parts = [
+        incident.get("incident_id", ""),
+        incident.get("title", ""),
+        incident.get("service", ""),
+        " ".join(incident.get("symptoms", []) or []),
+        " ".join(incident.get("alerts", []) or []),
+        incident.get("root_cause", ""),
+        incident.get("final_outcome", ""),
+        " ".join(incident.get("lessons_learned", []) or []),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def local_recall_incidents(query: str, service: str | None = None, limit: int = 5) -> List[Dict[str, Any]]:
+    """Return local match results from the dataset when the live Hindsight bank is unavailable."""
+    query_tokens = [token.lower() for token in str(query).replace("-", " ").split() if token.strip()]
+    matches: List[Dict[str, Any]] = []
+
+    for incident in load_historical_incidents():
+        if service and incident.get("service") != service:
+            continue
+
+        search_text = _incident_search_text(incident).lower()
+        score = 0
+        for token in query_tokens:
+            if token in search_text:
+                score += 2
+        if incident.get("service", "").lower() in query.lower():
+            score += 3
+        if incident.get("title", "").lower() in query.lower():
+            score += 5
+
+        if score > 0:
+            incident_id = incident.get("incident_id")
+            matches.append({
+                "id": incident_id,
+                "incident_id": incident_id,
+                "service": incident.get("service"),
+                "title": incident.get("title"),
+                "score": score,
+                "tags": [incident.get("service"), incident.get("severity", "")],
+                "text": (
+                    f"{incident.get('incident_id')} | {incident.get('service')} | "
+                    f"{incident.get('title')} | root cause: {incident.get('root_cause', '')}"
+                )[:400],
+            })
+
+    matches.sort(key=lambda item: item["score"], reverse=True)
+    return matches[:limit]
+
+
+def local_failed_remediation_recall(service: str | None = None, action_type: str | None = None, limit: int = 5) -> List[Dict[str, Any]]:
+    """Return local failed-fix warnings from the dataset without requiring a live Hindsight recall."""
+    matches: List[Dict[str, Any]] = []
+    for incident in load_historical_incidents():
+        if service and incident.get("service") != service:
+            continue
+        for action in incident.get("actions_attempted", []):
+            if action.get("outcome") != "failed":
+                continue
+            if action_type and action.get("action_type", "").lower() != str(action_type).lower():
+                continue
+            matches.append({
+                "id": incident.get("incident_id"),
+                "service": incident.get("service"),
+                "tags": ["warning:failed_fix", f"service:{incident.get('service')}"],
+                "text": (
+                    f"Failed remediation on {incident.get('incident_id')} ({incident.get('service')}): "
+                    f"{action.get('action_type')} failed because {action.get('reason', '')}"
+                )[:400],
+            })
+            break
+    return matches[:limit]
+
+
 def seed_hindsight_memory_bank():
     """Main seeding pipeline for Hindsight organizational memory bank."""
     print("=" * 80)
@@ -222,6 +299,9 @@ def seed_hindsight_memory_bank():
             service=q["service"],
             limit=2,
         )
+        if not similar_incidents:
+            similar_incidents = local_recall_incidents(q["query"], service=q["service"], limit=2)
+            print("  [Local offline fallback active] Relevant historical incidents retrieved from dataset.")
         print(f"Recalled Similar Incidents: {len(similar_incidents)} match(es)")
         for idx, inc in enumerate(similar_incidents, start=1):
             print(f"  [Incident #{idx}] ID: {inc.get('id')} | Score: {inc.get('score')}")
@@ -233,6 +313,13 @@ def seed_hindsight_memory_bank():
             service=q["service"],
             action_type=q["candidate_action"],
         )
+        if not failed_warnings:
+            failed_warnings = local_failed_remediation_recall(
+                service=q["service"],
+                action_type=q["candidate_action"],
+                limit=2,
+            )
+            print("  [Local offline fallback active] Failed-fix warnings retrieved from incident history.")
         print(f"Incident Time Machine Failed-Fix Warnings: {len(failed_warnings)} warning(s)")
         if failed_warnings:
             for idx, warn in enumerate(failed_warnings, start=1):

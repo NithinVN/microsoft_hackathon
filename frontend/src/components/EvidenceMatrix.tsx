@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CurrentEvidence, HistoricalEvidence, DocumentationEvidence, AIInferenceEvidence } from '../types/incident';
+import { CurrentEvidence, HistoricalEvidence, DocumentationEvidence, AIInferenceEvidence, IncidentMemorySource } from '../types/incident';
 import { Activity, History, BookOpen, Lightbulb, AlertCircle, FileText, CheckCircle2, XCircle } from 'lucide-react';
 
 interface EvidenceMatrixProps {
@@ -7,6 +7,8 @@ interface EvidenceMatrixProps {
   historicalEvidence: HistoricalEvidence[];
   documentation: DocumentationEvidence[];
   aiInference: AIInferenceEvidence;
+  memorySources?: IncidentMemorySource[];
+  memoryConfidence?: number;
 }
 
 export const EvidenceMatrix: React.FC<EvidenceMatrixProps> = ({
@@ -14,6 +16,8 @@ export const EvidenceMatrix: React.FC<EvidenceMatrixProps> = ({
   historicalEvidence,
   documentation,
   aiInference,
+  memorySources = [],
+  memoryConfidence = 0,
 }) => {
   const [activeTab, setActiveTab] = useState<'all' | 'current' | 'historical' | 'docs' | 'ai'>('all');
 
@@ -175,6 +179,36 @@ export const EvidenceMatrix: React.FC<EvidenceMatrixProps> = ({
                     </div>
                   </div>
                 ))}
+
+                {memorySources.length > 0 && (
+                  <div className="hist-incident-card">
+                    <div className="hist-incident-top">
+                      <span className="hist-id">HINDSIGHT MEMORY</span>
+                      <span className="hist-title">Retrieved memory evidence</span>
+                      <span className="hist-similarity">{(memoryConfidence * 100).toFixed(0)}% confidence</span>
+                    </div>
+
+                    <div className="hist-fixes-list">
+                      {memorySources.map((source) => (
+                        <div key={source.memory_id} className="past-fix-item fix-success">
+                          <div className="flex-row items-center">
+                            <span className="fix-name">{source.memory_id}</span>
+                            <span className="outcome-badge badge-success">{source.type}</span>
+                          </div>
+                          <p className="fix-consequence">{source.content}</p>
+                          <div className="fix-notes">
+                            <em>Source: {source.source} · Classification: {source.classification}</em>
+                          </div>
+                          {source.supporting_evidence.length > 0 && (
+                            <div className="fix-notes">
+                              <em>Supporting evidence: {source.supporting_evidence.join(', ')}</em>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

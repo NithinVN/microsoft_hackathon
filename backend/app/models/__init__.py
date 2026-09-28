@@ -15,6 +15,7 @@ from backend.app.models.postmortem import (
 )
 from backend.app.models.remediation import (
     ActionExecution,
+    ApprovalDecision,
     RemediationAction,
 )
 
@@ -29,5 +30,6 @@ __all__ = [
     "EngineerFeedback",
     "Postmortem",
     "ActionExecution",
+    "ApprovalDecision",
     "RemediationAction",
 ]

@@ -63,6 +63,27 @@ export interface HistoricalEvidence {
   hindsightReflection: string;
 }
 
+export interface IncidentMemorySource {
+  memory_id: string;
+  service: string;
+  content: string;
+  classification: string;
+  source: string;
+  type: string;
+  supporting_evidence: string[];
+}
+
+export interface IncidentMemoryResult {
+  similar_incidents: Array<Record<string, any>>;
+  historical_root_causes: Array<Record<string, any>>;
+  successful_fixes: Array<Record<string, any>>;
+  failed_fixes: Array<Record<string, any>>;
+  engineer_lessons: Array<Record<string, any>>;
+  historical_patterns: Array<Record<string, any>>;
+  memory_confidence: number;
+  memory_sources: IncidentMemorySource[];
+}
+
 export interface DocumentationEvidence {
   runbookTitle: string;
   docUrl: string;

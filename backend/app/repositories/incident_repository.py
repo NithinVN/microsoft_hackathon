@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 from backend.app.models.incident import Incident, IncidentEvent
 from backend.app.models.investigation import Diagnosis, Investigation
 from backend.app.models.postmortem import EngineerFeedback, Postmortem
-from backend.app.models.remediation import ActionExecution, RemediationAction
+from backend.app.models.remediation import ActionExecution, ApprovalDecision, RemediationAction
 from backend.app.schemas.incident import (
     ActionExecutionCreate,
     DiagnosisCreate,
@@ -116,6 +116,54 @@ class IncidentRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def _build_postmortem_for_incident(self, incident: Incident) -> PostmortemCreate:
+        """Synthesize the required resolved-incident learning summary from database evidence."""
+        diagnosis = incident.diagnoses[-1].root_cause_hypothesis if incident.diagnoses else incident.description or incident.title
+        successful_actions = []
+        failed_actions = []
+        failed_reasons = []
+
+        for execution in incident.executions or []:
+            action_title = "remediation action"
+            for remediation in incident.remediations or []:
+                if remediation.id == execution.remediation_action_id:
+                    action_title = remediation.title
+                    break
+
+            if execution.status in {"VERIFIED_RECOVERED", "APPROVED", "SUCCESS", "RECOVERED"}:
+                successful_actions.append(action_title)
+            else:
+                failed_actions.append(action_title)
+                if execution.approval_notes:
+                    failed_reasons.append(execution.approval_notes)
+
+        feedback_comments = [entry.comments for entry in incident.feedbacks or []]
+        lessons = list(filter(None, [
+            *[f"Do not repeat: {item}" for item in failed_actions],
+            *feedback_comments,
+            f"Observe and protect against the root cause: {diagnosis}",
+        ]))
+
+        timeline = [{"time": event.timestamp.strftime("%H:%M"), "event": event.message} for event in incident.events or []]
+        memory_id = f"HINDSIGHT-{incident.incident_id.upper()}"
+
+        return PostmortemCreate(
+            title=f"{incident.title} Postmortem",
+            duration_minutes=int((incident.resolved_at - incident.detected_at).total_seconds() // 60) if incident.resolved_at else 0,
+            root_cause=diagnosis,
+            trigger_event=incident.description or incident.title,
+            what_happened=incident.description or f"Incident {incident.incident_id} affected {incident.affected_service}.",
+            what_worked=successful_actions,
+            what_failed=failed_actions,
+            why_it_failed="; ".join(failed_reasons) if failed_reasons else "No failed remediation actions were observed in the final workflow.",
+            engineer_corrections=feedback_comments,
+            lessons_learned=lessons,
+            corrective_actions=successful_actions or ["Continue monitoring and verify the root cause remediation."],
+            timeline=timeline,
+            hindsight_retained=True,
+            hindsight_memory_id=memory_id,
+        )
+
     async def update_incident(self, incident_id: int, data: IncidentUpdate) -> Optional[Incident]:
         """Update fields of an existing incident."""
         incident = await self.get_incident_by_id(incident_id)
@@ -131,7 +179,14 @@ class IncidentRepository:
 
         await self.session.commit()
         await self.session.refresh(incident)
-        return incident
+
+        reloaded_incident = await self.get_incident_by_id(incident_id)
+        if str(getattr(incident, "status", "")).upper() == "RESOLVED" and reloaded_incident is not None and reloaded_incident.postmortem is None:
+            postmortem = await self.store_postmortem(incident.id, await self._build_postmortem_for_incident(reloaded_incident))
+            reloaded_incident.postmortem = postmortem
+            await self.session.flush()
+
+        return reloaded_incident or incident
 
     async def add_event(self, incident_id: int, data: IncidentEventCreate) -> IncidentEvent:
         """Add a chronological timeline event to an incident."""
@@ -274,24 +329,81 @@ class IncidentRepository:
         )
         return feedback
 
+    async def store_approval_decision(self, incident_id: int, data: Any) -> ApprovalDecision:
+        """Persist a human approval, reject, or modify decision and its simulated outcome."""
+        import json
+
+        decision = ApprovalDecision(
+            incident_id=incident_id,
+            engineer=data.engineer,
+            action=data.action,
+            original_recommendation=data.original_recommendation,
+            modified_recommendation=getattr(data, "modified_recommendation", None),
+            reason=data.reason,
+            timestamp=data.timestamp or utcnow(),
+            execution_result=json.dumps(data.execution_result or {}),
+        )
+        self.session.add(decision)
+        await self.session.commit()
+        await self.session.refresh(decision)
+        return decision
+
     async def store_postmortem(self, incident_id: int, data: PostmortemCreate) -> Postmortem:
         """Store incident postmortem record and Hindsight memory retain flag."""
+        incident = await self.get_incident_by_id(incident_id)
+        if incident is None:
+            raise ValueError(f"Incident {incident_id} not found")
+
+        memory_id = data.hindsight_memory_id or f"HINDSIGHT-{incident.incident_id.upper()}"
         postmortem = Postmortem(
             incident_id=incident_id,
             title=data.title,
             duration_minutes=data.duration_minutes,
             root_cause=data.root_cause,
             trigger_event=data.trigger_event,
+            what_happened=data.what_happened,
+            what_worked=data.what_worked,
+            what_failed=data.what_failed,
+            why_it_failed=data.why_it_failed,
+            engineer_corrections=data.engineer_corrections,
+            lessons_learned=data.lessons_learned,
             corrective_actions=data.corrective_actions,
             timeline=data.timeline,
             hindsight_retained=data.hindsight_retained,
-            hindsight_memory_id=data.hindsight_memory_id,
+            hindsight_memory_id=memory_id,
             created_at=utcnow(),
             updated_at=utcnow(),
         )
         self.session.add(postmortem)
         await self.session.commit()
         await self.session.refresh(postmortem)
+
+        postmortem_id = postmortem.id
+        incident.postmortem = postmortem
+        await self.session.commit()
+
+        if data.hindsight_retained:
+            from backend.app.memory.hindsight_service import hindsight_service
+
+            hindsight_service.retain_incident({
+                "incident_id": incident.incident_id,
+                "title": incident.title,
+                "affected_service": incident.affected_service,
+                "severity": incident.severity,
+                "status": "resolved",
+                "description": incident.description,
+                "symptoms": incident.symptoms,
+                "root_cause": data.root_cause,
+                "resolution": "; ".join(data.corrective_actions or data.what_worked or ["Incident resolved"]),
+            })
+            hindsight_service.retain_postmortem(
+                incident_id=incident.incident_id,
+                service=incident.affected_service,
+                executive_summary=data.what_happened or data.root_cause,
+                root_cause_analysis=data.root_cause,
+                lessons_learned=data.lessons_learned or ["Incident was resolved with evidence-based remediation."],
+                preventive_actions=data.corrective_actions or ["Monitor and harden the service against the root cause."],
+            )
 
         # Timeline event
         await self.add_event(
@@ -300,7 +412,7 @@ class IncidentRepository:
                 event_type="POSTMORTEM_SAVED",
                 actor="PostmortemAgent",
                 message=f"Postmortem saved: {data.title} (Duration: {data.duration_minutes}m, Retained: {data.hindsight_retained})",
-                payload={"postmortem_id": postmortem.id, "hindsight_retained": data.hindsight_retained},
+                payload={"postmortem_id": postmortem_id, "hindsight_retained": data.hindsight_retained, "hindsight_memory_id": memory_id},
             ),
         )
         return postmortem

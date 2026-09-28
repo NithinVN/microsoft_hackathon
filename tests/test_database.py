@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -18,6 +20,10 @@ from backend.app.schemas.incident import (
 
 # Test-specific in-memory async SQLite engine
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @pytest_asyncio.fixture(scope="function")
@@ -315,3 +321,105 @@ async def test_postmortem_and_feedback_recording(db_session: AsyncSession):
     assert retrieved.postmortem is not None
     assert retrieved.postmortem.hindsight_retained is True
     assert len(retrieved.feedbacks) == 1
+
+
+@pytest.mark.asyncio
+async def test_resolved_incident_generates_learning_loop_postmortem(db_session: AsyncSession):
+    """Resolved incidents must produce a structured postmortem with action history and Hindsight retention metadata."""
+    repo = IncidentRepository(db_session)
+
+    incident = await repo.create_incident(
+        IncidentCreate(
+            incident_id="INC-700",
+            title="Redis Connection Storm",
+            description="Redis connection saturation caused checkout errors during peak traffic.",
+            severity="SEV-1",
+            status="INVESTIGATING",
+            affected_service="payment-api",
+            symptoms=["Checkout error rate above 20%", "Queue depth rose to 900"],
+        )
+    )
+
+    await repo.store_diagnosis(
+        incident.id,
+        DiagnosisCreate(
+            agent_name="DiagnosisAgent",
+            root_cause_hypothesis="Expired connection pool re-use under promotion traffic caused saturation.",
+            confidence_score=0.93,
+            chain_of_thought=["Worker counts increased", "Connection pool leak observed"],
+            risk_assessment="High customer impact",
+        ),
+    )
+
+    successful_action = await repo.store_remediation(
+        incident.id,
+        RemediationActionCreate(
+            action_key="scale_pool",
+            title="Increase DB pool size",
+            description="Scale DB pool and drain stale connections.",
+            command_template="scale_pool 250",
+            safety_level="SAFE",
+            historical_precedent="SUCCESS_BEFORE",
+            is_recommended=True,
+        ),
+    )
+    await repo.store_execution_result(
+        incident.id,
+        ActionExecutionCreate(
+            remediation_action_id=successful_action.id,
+            status="VERIFIED_RECOVERED",
+            approved_by="eng_rose",
+            approval_notes="Pool growth fixed the leak.",
+            execution_output="Connection pool stabilized; checkout recovered.",
+            verification_status="VERIFIED_RECOVERED",
+        ),
+    )
+
+    failed_action = await repo.store_remediation(
+        incident.id,
+        RemediationActionCreate(
+            action_key="flush_redis",
+            title="Flush Redis",
+            description="Unsafe flush during live traffic.",
+            command_template="flushall",
+            safety_level="DANGEROUS",
+            historical_precedent="FAILED_BEFORE",
+            is_recommended=False,
+        ),
+    )
+    await repo.store_execution_result(
+        incident.id,
+        ActionExecutionCreate(
+            remediation_action_id=failed_action.id,
+            status="FAILED",
+            approved_by="eng_rose",
+            approval_notes="Rejected after historical safeguard.",
+            execution_output="Unsafe action rejected; no production impact.",
+            verification_status="NOT_APPLICABLE",
+        ),
+    )
+
+    await repo.store_feedback(
+        incident.id,
+        EngineerFeedbackCreate(
+            engineer_id="eng_rose",
+            rating=5,
+            comments="The pool expansion worked. We should never flush live Redis again.",
+            accuracy_evaluation="accurate",
+        ),
+    )
+
+    resolved = await repo.update_incident(
+        incident.id,
+        IncidentUpdate(status="RESOLVED", resolved_at=utcnow(), description="Recovered after pool expansion."),
+    )
+
+    assert resolved is not None
+    assert resolved.status == "RESOLVED"
+    assert resolved.postmortem is not None
+    assert resolved.postmortem.root_cause == "Expired connection pool re-use under promotion traffic caused saturation."
+    assert resolved.postmortem.what_failed
+    assert resolved.postmortem.what_worked
+    assert resolved.postmortem.lessons_learned
+    assert resolved.postmortem.hindsight_retained is True
+    assert resolved.postmortem.hindsight_memory_id is not None

@@ -10,7 +10,9 @@ Architectural Rule:
   and temporal reasoning (Retain, Recall, Reflect).
 """
 
+import asyncio
 from datetime import datetime, timezone
+import inspect
 import json
 from typing import Any, Dict, List, Optional, Union
 
@@ -835,6 +837,17 @@ class HindsightService:
             return {"success": False, "error": "Client not initialized", "bank_id": bank_id}
 
         try:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                logger.warning(
+                    "Hindsight retain skipped because the SDK is synchronous and the app is already in an async event loop; preserving safety and avoiding loop re-entry.",
+                    extra={"bank_id": bank_id, "tags": tags, "doc": document_id},
+                )
+                return {"success": False, "error": "Async event loop is active; Hindsight retain skipped", "bank_id": bank_id}
+
             logger.info("Retaining memory to Hindsight", extra={"bank_id": bank_id, "tags": tags, "doc": document_id})
             resp = client.retain(
                 bank_id=bank_id,
@@ -887,6 +900,9 @@ class HindsightService:
                 max_tokens=4096,
                 budget="mid",
             )
+            if inspect.isawaitable(resp):
+                logger.warning("Hindsight recall returned an awaitable; treating as unavailable to avoid un-awaited coroutine warnings.")
+                return []
 
             results: List[Dict[str, Any]] = []
             raw_results = getattr(resp, "results", []) or []

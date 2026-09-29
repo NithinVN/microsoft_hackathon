@@ -121,6 +121,7 @@ export function App() {
   const [organizationalMemory, setOrganizationalMemory] = useState<OrganizationalMemoryResult | null>(null);
   const [loadingMemory, setLoadingMemory] = useState<boolean>(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
+  const [memoryRetry, setMemoryRetry] = useState(0);
 
   const activeCount = MOCK_SCENARIOS.filter((entry) => entry.status !== 'RESOLVED' && entry.status !== 'POSTMORTEM_SAVED').length;
   const affectedServiceCount = new Set(MOCK_SCENARIOS.flatMap((entry) => entry.blastRadius.nodes.filter((node) => node.affected).map((node) => node.name))).size;
@@ -174,7 +175,7 @@ export function App() {
 
     void loadMemory();
     return () => { cancelled = true; };
-  }, [activeScenario.id]);
+  }, [activeScenario.id, memoryRetry]);
 
   const timelineEntries = activeScenario.postmortem.timeline.length
     ? activeScenario.postmortem.timeline
@@ -222,6 +223,12 @@ export function App() {
             </span>
             <span className={`header-badge ${health?.services?.hindsight_configured ? 'header-badge--good' : 'header-badge--muted'}`}>
               <i className="status-indicator" />Hindsight {health?.services?.hindsight_configured ? 'configured' : 'not configured'}
+            </span>
+            <span className={`header-badge ${health?.services?.groq_configured ? 'header-badge--good' : 'header-badge--warn'}`} title="Groq is optional for the current deterministic diagnosis fallback">
+              <i className="status-indicator" />Groq {health?.services?.groq_configured ? 'configured' : 'fallback mode'}
+            </span>
+            <span className={`header-badge ${health?.services?.postgresql === 'available' ? 'header-badge--good' : health?.services?.postgresql === 'unavailable' ? 'header-badge--warn' : 'header-badge--muted'}`}>
+              <i className="status-indicator" />PostgreSQL {health?.services?.postgresql ?? 'checking'}
             </span>
             <button className="icon-button" type="button" onClick={loadHealth} aria-label="Refresh system health" title="Refresh system health" disabled={loadingHealth}>
               <RefreshCw size={15} />
@@ -492,7 +499,7 @@ export function App() {
 
           {screen === 'memory' && (
             <div className="screen-stack">
-              {memoryError && <div className="state-banner state-banner--error" role="alert">{memoryError}</div>}
+              {memoryError && <div className="state-banner state-banner--error" role="alert"><span>{memoryError}</span><button type="button" className="text-button" onClick={() => setMemoryRetry((value) => value + 1)} disabled={loadingMemory}>Retry</button></div>}
               <section className="memory-overview panel">
                 <div>
                   <span className="memory-kicker">Organizational knowledge bank</span>

@@ -1,9 +1,12 @@
 import hmac
 from typing import List, Optional
+from dataclasses import asdict
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import settings
+from backend.app.core.logging import logger
+from backend.app.orchestration.incident_orchestrator import IncidentOrchestrator
 from backend.app.agents.incident_memory_agent import assess_incident_memory
 from backend.app.agents.time_machine_agent import _failed_fix_warning_for_incident, build_time_machine_analysis
 from backend.app.db.session import get_db
@@ -32,6 +35,27 @@ from backend.app.schemas.incident import (
 )
 
 router = APIRouter()
+
+
+@router.post("/{incident_id}/orchestrate")
+def retry_incident_analysis(incident_id: str) -> dict:
+    """Retry analysis for a persisted incident; execution still requires human approval."""
+    try:
+        state = IncidentOrchestrator().run(incident_id)
+        return asdict(state)
+    except Exception as exc:
+        logger.exception("Incident analysis retry failed.", extra={
+            "incident_id": incident_id,
+            "error_type": type(exc).__name__,
+            "retryable": True,
+        })
+        return {
+            "incident_id": incident_id,
+            "status": "failed",
+            "current_step": "RETRY",
+            "retryable": True,
+            "message": "Analysis could not be completed. The incident remains saved; retry when dependent services recover.",
+        }
 
 
 def require_operator_authorization(authorization: Optional[str] = Header(None, alias="Authorization")) -> None:

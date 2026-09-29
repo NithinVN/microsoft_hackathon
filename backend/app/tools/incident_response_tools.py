@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from backend.app.core.logging import logger
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATASET_PATH = PROJECT_ROOT / "data" / "historical_incidents.json"
@@ -1158,14 +1159,24 @@ def list_tool_specs() -> List[Dict[str, Any]]:
 def execute_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     tool = TOOL_REGISTRY.get(tool_name)
     if tool is None:
+        logger.warning("Tool invocation rejected.", extra={"tool_name": tool_name, "error_code": "unknown_tool"})
         return _safe_error("unknown_tool", "Unknown tool requested")
     try:
-        return tool.function(arguments)
-    except IncidentToolError:
+        result = tool.function(arguments)
+        if isinstance(result, dict) and result.get("ok") is False:
+            logger.warning("Tool returned a failure result.", extra={
+                "tool_name": tool_name,
+                "error_code": (result.get("error") or {}).get("code", "tool_error"),
+            })
+        return result
+    except IncidentToolError as exc:
+        logger.exception("Tool execution failed.", extra={"tool_name": tool_name, "error_type": type(exc).__name__})
         return _safe_error("tool_execution_error", "Tool execution failed")
     except ValidationError as exc:
+        logger.warning("Tool arguments failed validation.", extra={"tool_name": tool_name, "error_code": "validation_error", "error_count": len(exc.errors())})
         return _safe_error("validation_error", "Tool validation failed", {"errors": exc.errors()})
-    except Exception:  # pragma: no cover - last-resort guard
+    except Exception as exc:  # pragma: no cover - last-resort guard
+        logger.exception("Unexpected tool invocation error.", extra={"tool_name": tool_name, "error_type": type(exc).__name__})
         return _safe_error("tool_execution_error", "Tool execution failed")
 
 

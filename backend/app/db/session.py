@@ -52,6 +52,22 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def init_db() -> None:
     """Initialize database tables for local testing and standalone verification."""
     logger.info("Initializing database schema...")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database schema initialized successfully.")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database schema initialized successfully.", extra={"subsystem": "postgresql", "status": "available"})
+    except Exception as exc:
+        logger.error("Database initialization failed; API will start in degraded mode.", extra={"subsystem": "postgresql", "status": "unavailable", "error_type": type(exc).__name__})
+
+
+async def check_db_health() -> bool:
+    """Probe the configured database without making API liveness depend on it."""
+    from sqlalchemy import text
+
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+        return True
+    except Exception as exc:
+        logger.warning("Database health probe failed.", extra={"subsystem": "postgresql", "status": "unavailable", "error_type": type(exc).__name__})
+        return False

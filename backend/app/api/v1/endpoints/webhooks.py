@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -8,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import settings
@@ -219,6 +221,10 @@ async def receive_alertmanager_webhook(
         await db.rollback()
         if isinstance(exc, HTTPException):
             raise
+        if isinstance(exc, (SQLAlchemyError, OSError, TimeoutError)):
+            logger.exception("Alertmanager could not persist the notification; the sender may retry.", extra={"source": "alertmanager", "retryable": True, "error_type": type(exc).__name__})
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Incident storage is temporarily unavailable. Retry this webhook; no incident was acknowledged as stored.", headers={"Retry-After": "5"}) from exc
+        logger.exception("Alertmanager notification processing failed.", extra={"source": "alertmanager", "error_type": type(exc).__name__})
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Alertmanager notification could not be processed.",
@@ -471,7 +477,10 @@ async def receive_azure_monitor_webhook(
             logger.info("Executing Incident Orchestrator workflow for '%s'", incident.incident_id)
             try:
                 orchestrator = IncidentOrchestrator()
-                orch_state = orchestrator.run(incident.incident_id)
+                orch_state = await asyncio.wait_for(
+                    asyncio.to_thread(orchestrator.run, incident.incident_id),
+                    timeout=settings.WEBHOOK_ORCHESTRATION_TIMEOUT_SECONDS,
+                )
                 orchestrator_status = orch_state.status
                 orchestrator_step = orch_state.current_step
                 logger.info(
@@ -480,9 +489,22 @@ async def receive_azure_monitor_webhook(
                     orch_state.status,
                     orch_state.current_step,
                 )
+            except asyncio.TimeoutError:
+                logger.warning("Webhook orchestration timed out; incident was committed and can be retried.", extra={
+                    "incident_id": incident.incident_id,
+                    "source": "azure-monitor",
+                    "retryable": True,
+                    "timeout_seconds": settings.WEBHOOK_ORCHESTRATION_TIMEOUT_SECONDS,
+                })
+                orchestrator_status = "timed_out_retryable"
             except Exception as orch_exc:
-                logger.error("Incident Orchestrator failed while processing an Azure alert (error_type=%s)", type(orch_exc).__name__)
-                orchestrator_status = "orchestrator_failed"
+                logger.exception("Incident Orchestrator failed while processing an Azure alert.", extra={
+                    "incident_id": incident.incident_id,
+                    "source": "azure-monitor",
+                    "error_type": type(orch_exc).__name__,
+                    "retryable": True,
+                })
+                orchestrator_status = "orchestrator_failed_retryable"
 
         return {
             "status": "accepted",
@@ -494,6 +516,8 @@ async def receive_azure_monitor_webhook(
             "severity": severity,
             "orchestrator_status": orchestrator_status,
             "orchestrator_step": orchestrator_step,
+            "orchestrator_retryable": orchestrator_status in {"timed_out_retryable", "orchestrator_failed_retryable"},
+            "orchestrator_message": "Incident was recorded, but automated analysis timed out. Retry analysis from the incident record." if orchestrator_status == "timed_out_retryable" else None,
             "created": 1,
             "resolved": 0,
             "ignored": 0,
@@ -512,6 +536,9 @@ async def receive_azure_monitor_webhook(
         await db.rollback()
         if isinstance(exc, HTTPException):
             raise
+        if isinstance(exc, (SQLAlchemyError, OSError, TimeoutError)):
+            logger.exception("Azure Monitor could not persist the notification; the sender may retry.", extra={"source": "azure-monitor", "retryable": True, "error_type": type(exc).__name__})
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Incident storage is temporarily unavailable. Retry this webhook; no incident was acknowledged as stored.", headers={"Retry-After": "5"}) from exc
         logger.error("Error processing Azure Monitor webhook (error_type=%s)", type(exc).__name__)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

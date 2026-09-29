@@ -10,6 +10,7 @@ export interface HealthCheckResponse {
     hindsight_configured: boolean;
     groq_configured: boolean;
     database_url_configured: boolean;
+    postgresql?: 'available' | 'unavailable';
   };
 }
 
@@ -90,17 +91,18 @@ export interface OrganizationalMemoryResult {
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1';
 
 export async function fetchHealth(): Promise<HealthCheckResponse> {
-  const response = await fetch(`${API_BASE_URL}/health`, {
-    headers: {
-      'Accept': 'application/json',
-    },
-  });
+  const [response, readinessResponse] = await Promise.all([
+    fetch(`${API_BASE_URL}/health`, { headers: { 'Accept': 'application/json' } }),
+    fetch(`${API_BASE_URL}/health/ready`, { headers: { 'Accept': 'application/json' } }),
+  ]);
 
   if (!response.ok) {
     throw new Error(`HTTP error! status: ${response.status}`);
   }
 
-  return response.json();
+  if (!readinessResponse.ok) throw new Error(`Database readiness could not be checked: ${readinessResponse.status}`);
+  const [health, readiness] = await Promise.all([response.json(), readinessResponse.json()]);
+  return { ...health, services: { ...health.services, postgresql: readiness.services?.postgresql } };
 }
 
 export async function fetchIncidents(params?: { status?: string; severity?: string }): Promise<ApiIncident[]> {
@@ -126,6 +128,22 @@ export async function getIncidentById(idOrIncidentId: string): Promise<ApiIncide
   if (!response.ok) {
     throw new Error(`Failed to fetch incident ${idOrIncidentId}: ${response.statusText}`);
   }
+  return response.json();
+}
+
+export async function retryIncidentAnalysis(idOrIncidentId: string): Promise<{
+  incident_id: string;
+  current_step: string;
+  status: string;
+  retryable?: boolean;
+  warnings: string[];
+  errors: string[];
+}> {
+  const response = await fetch(`${API_BASE_URL}/incidents/${encodeURIComponent(idOrIncidentId)}/orchestrate`, {
+    method: 'POST',
+    headers: { 'Accept': 'application/json' },
+  });
+  if (!response.ok) throw new Error(`Incident analysis retry failed: ${response.statusText}`);
   return response.json();
 }
 

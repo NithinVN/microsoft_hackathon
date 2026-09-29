@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from backend.app.core.config import settings
+from backend.app.db.session import check_db_health
 
 router = APIRouter()
 
@@ -44,9 +45,15 @@ async def liveness() -> Dict[str, str]:
 
 
 @router.get("/ready")
-async def readiness() -> Dict[str, str]:
+async def readiness() -> Dict[str, Any]:
     """Kubernetes/container readiness probe."""
-    return {"status": "ready"}
+    database_ready = await check_db_health()
+    return {
+        "status": "ready" if database_ready else "degraded",
+        "services": {"postgresql": "available" if database_ready else "unavailable"},
+        "retryable": not database_ready,
+        "message": "Database is reachable." if database_ready else "Database is temporarily unavailable; incident records have not been discarded.",
+    }
 
 
 @router.get("/hindsight")

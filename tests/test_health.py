@@ -39,9 +39,12 @@ def test_liveness_and_readiness(client: TestClient):
     assert live_resp.status_code == 200
     assert live_resp.json() == {"status": "alive"}
 
-    ready_resp = client.get("/api/v1/health/ready")
+    from unittest.mock import patch
+    with patch("backend.app.api.v1.endpoints.health.check_db_health", return_value=True):
+        ready_resp = client.get("/api/v1/health/ready")
     assert ready_resp.status_code == 200
-    assert ready_resp.json() == {"status": "ready"}
+    assert ready_resp.json()["status"] == "ready"
+    assert ready_resp.json()["services"]["postgresql"] == "available"
 
 
 def test_cors_preflight(client: TestClient):

@@ -10,6 +10,7 @@ from backend.app.agents.investigation_agent import investigate_incident
 from backend.app.agents.remediation_agent import build_remediation_plan
 from backend.app.memory.hindsight_service import hindsight_service
 from backend.app.tools import get_incident_details, get_runbook
+from backend.app.core.logging import logger
 
 
 @dataclass
@@ -32,6 +33,7 @@ class OrchestratorState:
     transition_log: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    retryable: bool = False
 
 
 class IncidentOrchestrator:
@@ -67,6 +69,23 @@ class IncidentOrchestrator:
         if message not in state.warnings:
             state.warnings.append(message)
 
+    def _invoke(self, state: OrchestratorState, step: str, operation: Any, fallback: Any, *args: Any) -> Any:
+        """Run an optional subsystem step without losing incident state on failure."""
+        try:
+            return operation(*args)
+        except Exception as exc:
+            message = f"{step.replace('_', ' ').title()} is temporarily unavailable. The incident was preserved; retry this step when the service recovers."
+            state.retryable = True
+            self._add_warning(state, message)
+            self._record(state, step, "warning", message)
+            logger.exception("Incident workflow subsystem failure", extra={
+                "incident_id": state.incident_id,
+                "step": step,
+                "error_type": type(exc).__name__,
+                "retryable": True,
+            })
+            return fallback
+
     def _safe_hindsight_available(self) -> bool:
         return bool(getattr(hindsight_service, "is_configured", False))
 
@@ -96,7 +115,24 @@ class IncidentOrchestrator:
             self._record(state, "HINDSIGHT_LEARNING", "warning", "Hindsight unavailable")
             return
 
-        state.hindsight_status = "retained"
+        state.hindsight_status = "retaining"
+        retention_failed = False
+
+        def retain(method: str, *args: Any, **kwargs: Any) -> Any:
+            nonlocal retention_failed
+            try:
+                result = getattr(hindsight_service, method)(*args, **kwargs)
+                if isinstance(result, dict) and result.get("success") is False:
+                    retention_failed = True
+                return result
+            except Exception as exc:
+                retention_failed = True
+                logger.exception("Hindsight retain operation failed.", extra={
+                    "incident_id": state.incident_id,
+                    "operation": method,
+                    "error_type": type(exc).__name__,
+                })
+                return {"success": False}
         incident = state.incident or {}
         service = str(incident.get("service") or "unknown")
         root_cause = str((state.diagnosis or {}).get("primary_hypothesis") or incident.get("root_cause") or "Root cause under investigation")
@@ -107,7 +143,7 @@ class IncidentOrchestrator:
                 approved_action = str(action.get("action") or "UNKNOWN_ACTION")
                 break
 
-        hindsight_service.retain_incident({
+        retain("retain_incident", {
             "incident_id": state.incident_id,
             "affected_service": service,
             "severity": incident.get("severity") or "medium",
@@ -122,7 +158,7 @@ class IncidentOrchestrator:
         })
 
         if root_cause:
-            hindsight_service.retain_root_cause(
+            retain("retain_root_cause",
                 incident_id=state.incident_id,
                 service=service,
                 root_cause=root_cause,
@@ -130,7 +166,7 @@ class IncidentOrchestrator:
             )
 
         if approved_action:
-            hindsight_service.retain_successful_fix(
+            retain("retain_successful_fix",
                 incident_id=state.incident_id,
                 service=service,
                 action_type=approved_action,
@@ -140,7 +176,7 @@ class IncidentOrchestrator:
             )
 
         if state.postmortem:
-            hindsight_service.retain_postmortem(
+            retain("retain_postmortem",
                 incident_id=state.incident_id,
                 service=service,
                 executive_summary=str(state.postmortem.get("incident_summary") or "Resolved incident record."),
@@ -153,7 +189,7 @@ class IncidentOrchestrator:
         engineer_id = str(feedback.get("engineer_id") or "engineer-unknown")
         rating = str(feedback.get("rating") or "unknown")
         if engineer_id and rating:
-            hindsight_service.retain_engineer_feedback(
+            retain("retain_engineer_feedback",
                 incident_id=state.incident_id,
                 service=service,
                 engineer_id=engineer_id,
@@ -161,13 +197,19 @@ class IncidentOrchestrator:
                 feedback_text=str(feedback.get("comments") or "No additional comments provided."),
             )
 
-        self._record(state, "HINDSIGHT_LEARNING", "ok", "Hindsight retention completed successfully.")
+        if retention_failed:
+            state.hindsight_status = "unavailable"
+            self._add_warning(state, "Hindsight retention failed; the incident and postmortem remain available for retry.")
+            self._record(state, "HINDSIGHT_LEARNING", "warning", "Hindsight retention failed; retry is available.")
+        else:
+            state.hindsight_status = "retained"
+            self._record(state, "HINDSIGHT_LEARNING", "ok", "Hindsight retention completed successfully.")
 
     def run(self, incident_id: str, approval_override: Optional[Dict[str, Any]] = None) -> OrchestratorState:
         state = OrchestratorState(incident_id=incident_id)
         self._record(state, "START", "started", "Workflow initialized.")
 
-        incident_response = get_incident_details({"incident_id": incident_id})
+        incident_response = self._invoke(state, "LOAD_INCIDENT", get_incident_details, {"ok": False}, {"incident_id": incident_id})
         incident = self._normalise_incident(incident_response)
         if incident is None:
             state.status = "failed"
@@ -181,9 +223,13 @@ class IncidentOrchestrator:
         state.status = "running"
         self._record(state, "LOAD_INCIDENT", "ok", f"Loaded incident {incident_id}.")
 
-        investigation = investigate_incident(incident_id)
+        investigation = self._invoke(state, "INVESTIGATION", investigate_incident, {
+            "incident_id": incident_id, "candidate_causes": [], "timeline": [], "evidence": [],
+            "uncertainties": ["Investigation service unavailable; retry recommended."],
+        }, incident_id)
         if not self._validate_investigation(investigation):
             state.status = "failed"
+            state.retryable = True
             self._add_error(state, "invalid agent output: investigation agent returned an invalid payload.")
             self._record(state, "INVESTIGATION", "error", "Invalid investigation payload.")
             self._record(state, "END", "failed", "Workflow terminated due to invalid agent output.")
@@ -193,9 +239,10 @@ class IncidentOrchestrator:
         state.timeline = investigation.get("timeline", []) if isinstance(investigation.get("timeline", []), list) else []
         self._record(state, "INVESTIGATION", "ok", "Investigation completed.")
 
-        blast_radius = assess_blast_radius(incident_id)
+        blast_radius = self._invoke(state, "BLAST_RADIUS", assess_blast_radius, {"directly_affected_services": [], "severity_assessment": "unknown"}, incident_id)
         if not self._validate_blast_radius(blast_radius):
             state.status = "failed"
+            state.retryable = True
             self._add_error(state, "invalid agent output: blast radius agent returned an invalid payload.")
             self._record(state, "BLAST_RADIUS", "error", "Invalid blast-radius payload.")
             self._record(state, "END", "failed", "Workflow terminated due to invalid agent output.")
@@ -204,9 +251,12 @@ class IncidentOrchestrator:
         state.blast_radius = blast_radius
         self._record(state, "BLAST_RADIUS", "ok", "Blast-radius assessment complete.")
 
-        memory = assess_incident_memory(incident_id)
+        memory = self._invoke(state, "MEMORY", assess_incident_memory, {
+            "memory_sources": [], "similar_incidents": [], "engineer_lessons": [], "memory_confidence": 0,
+        }, incident_id)
         if not self._validate_memory(memory):
             state.status = "failed"
+            state.retryable = True
             self._add_error(state, "invalid agent output: memory agent returned an invalid payload.")
             self._record(state, "MEMORY", "error", "Invalid memory payload.")
             self._record(state, "END", "failed", "Workflow terminated due to invalid agent output.")
@@ -215,11 +265,14 @@ class IncidentOrchestrator:
         state.memory = memory
         self._record(state, "MEMORY", "ok", "Hindsight and local memory evidence loaded.")
 
-        runbook_response = get_runbook({"service": str(incident.get("service") or "unknown")}) if incident.get("service") else {"ok": False}
+        runbook_response = self._invoke(state, "RUNBOOK", get_runbook, {"ok": False}, {"service": str(incident.get("service") or "unknown")}) if incident.get("service") else {"ok": False}
         runbook = runbook_response.get("data") if runbook_response.get("ok") else None
-        diagnosis = diagnose_incident(investigation, blast_radius, memory, runbook)
+        diagnosis = self._invoke(state, "DIAGNOSIS", diagnose_incident, {
+            "primary_hypothesis": "Diagnosis service unavailable; evidence is insufficient for a safe recommendation.", "confidence": 0.0,
+        }, investigation, blast_radius, memory, runbook)
         if not self._validate_diagnosis(diagnosis):
             state.status = "failed"
+            state.retryable = True
             self._add_error(state, "invalid agent output: diagnosis agent returned an invalid payload.")
             self._record(state, "DIAGNOSIS", "error", "Invalid diagnosis payload.")
             self._record(state, "END", "failed", "Workflow terminated due to invalid agent output.")
@@ -236,7 +289,9 @@ class IncidentOrchestrator:
         }
         self._record(state, "WHAT_IF_ANALYSIS", "ok", "What-if analysis completed.")
 
-        remediation_plan = build_remediation_plan(investigation, blast_radius, diagnosis, memory, runbook)
+        remediation_plan = self._invoke(state, "REMEDIATION", build_remediation_plan, {
+            "recommended_actions": [], "why": "Remediation planning is unavailable; no action is authorized.",
+        }, investigation, blast_radius, diagnosis, memory, runbook)
         state.remediation_plan = remediation_plan
         self._record(state, "REMEDIATION", "ok", "Remediation plan generated.")
 
@@ -251,6 +306,23 @@ class IncidentOrchestrator:
                 approval_reason = str(approval.get("reason") or "Human rejected the remediation.")
             self._record(state, "HUMAN_APPROVAL", "blocked", approval_reason)
             state.current_step = "HUMAN_APPROVAL"
+            return state
+
+        from backend.app.tools import simulate_remediation
+        proposed_action = (remediation_plan.get("recommended_actions") or [{}])[0].get("action")
+        simulation = self._invoke(state, "EXECUTION", simulate_remediation, {"ok": False, "error": {"code": "simulation_unavailable"}}, {
+            "service": str(incident.get("service") or "unknown"),
+            "incident_id": incident_id,
+            "action_type": proposed_action or "CHECK_DEPENDENCY_HEALTH",
+            "dry_run": True,
+        })
+        if not simulation.get("ok") or simulation.get("data", {}).get("predicted_outcome") == "likely_failure":
+            state.execution = {"status": "failed", "details": "Remediation simulation failed or predicted failure; no action was executed. Retry after reviewing the evidence."}
+            state.retryable = True
+            self._add_warning(state, state.execution["details"])
+            self._record(state, "EXECUTION", "error", state.execution["details"])
+            state.status = "blocked"
+            state.current_step = "EXECUTION"
             return state
 
         state.execution = {
@@ -294,7 +366,7 @@ class IncidentOrchestrator:
         }
         self._record(state, "POSTMORTEM", "ok", "Postmortem generated.")
 
-        self._run_hindsight_learning(state)
+        self._invoke(state, "HINDSIGHT_LEARNING", self._run_hindsight_learning, None, state)
 
         if state.warnings:
             state.status = "completed_with_warnings"

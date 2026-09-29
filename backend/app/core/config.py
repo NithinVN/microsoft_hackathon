@@ -121,6 +121,7 @@ class Settings(BaseSettings):
         default=False,
         description="Whether incoming Azure alerts should automatically run full agent orchestration",
     )
+    WEBHOOK_ORCHESTRATION_TIMEOUT_SECONDS: float = Field(default=15.0, gt=0, le=120)
 
 
 settings = Settings()

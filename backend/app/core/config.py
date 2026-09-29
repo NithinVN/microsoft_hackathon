@@ -1,5 +1,5 @@
 from typing import List, Union
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,10 +34,14 @@ class Settings(BaseSettings):
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
         if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
+            origins = [origin.strip() for origin in v.split(",") if origin.strip()]
         elif isinstance(v, list):
-            return v
-        return []
+            origins = v
+        else:
+            origins = []
+        if "*" in origins:
+            raise ValueError("ALLOWED_ORIGINS must not contain '*' when credentials are enabled")
+        return origins
 
     # Groq LLM Configuration
     GROQ_API_KEY: str = Field(default="", description="API Key for Groq cloud API")
@@ -87,6 +91,28 @@ class Settings(BaseSettings):
         default="",
         description="Optional shared secret or auth token for Azure Monitor Action Group webhook authentication",
     )
+    ALERTMANAGER_WEBHOOK_SECRET: str = Field(
+        default="",
+        description="Shared secret for Alertmanager webhook authentication",
+    )
+    OPERATOR_API_TOKEN: str = Field(
+        default="",
+        description="Bearer token required for remediation approval and execution-record endpoints outside development/test",
+    )
+
+    @model_validator(mode="after")
+    def validate_production_settings(self) -> "Settings":
+        if self.APP_ENV.lower() not in {"development", "test"}:
+            if self.DEBUG:
+                raise ValueError("DEBUG must be false in production")
+            if len(self.POSTGRES_PASSWORD) < 16 or self.POSTGRES_PASSWORD.lower() in {
+                "incidentmind",
+                "change-me",
+            } or "replace-with" in self.POSTGRES_PASSWORD.lower():
+                raise ValueError("Production requires a unique PostgreSQL password of at least 16 characters")
+            if "replace-with" in self.DATABASE_URL.lower() or ":incidentmind@" in self.DATABASE_URL.lower():
+                raise ValueError("Production DATABASE_URL must not contain the development database credentials")
+        return self
     AZURE_DEFAULT_SERVICE: str = Field(
         default="azure-service",
         description="Default affected service name if not extractable from alert payload",

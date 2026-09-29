@@ -74,6 +74,14 @@ def test_invalid_tool_and_invalid_input_fail_safely():
     assert bad_input["ok"] is False
     assert bad_input["error"]["code"] == "validation_error"
 
+    extra_argument = execute_tool(
+        "get_service_metrics",
+        {"service": "payment-api", "unexpected": "must not be ignored"},
+    )
+    assert extra_argument["ok"] is False
+    assert extra_argument["error"]["code"] == "validation_error"
+    assert "must not be ignored" not in json.dumps(extra_argument)
+
 
 def test_recall_helpers_are_deterministic_for_service_specific_queries():
     payment_matches = recall_similar_incidents({"query": "thread starvation payment api", "service": "payment-api", "limit": 3})

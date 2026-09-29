@@ -118,7 +118,7 @@ IncidentMind prioritizes the **Azure Monitor Common Alert Schema** (Microsoft's 
 
 ## Authentication & Security Options
 
-When `AZURE_WEBHOOK_SECRET` is configured in `.env`, the endpoint validates each incoming request using constant-time digest comparison (`hmac.compare_digest`). The secret can be supplied via any of the following methods:
+When `AZURE_WEBHOOK_SECRET` is configured, the endpoint validates each incoming request using constant-time digest comparison (`hmac.compare_digest`). Staging and production requests fail with HTTP 503 if the secret is missing; an unset secret is accepted only in development/test. Prefer a header or bearer token where the sender supports it. Azure's `code` query parameter is retained for Action Group compatibility, but query strings can be captured in proxy/access logs and must be redacted.
 
 1. **Query Parameter (Standard for Azure Action Groups)**:
    ```text
@@ -133,7 +133,7 @@ When `AZURE_WEBHOOK_SECRET` is configured in `.env`, the endpoint validates each
    Authorization: Bearer YOUR_SECRET
    ```
 
-If `AZURE_WEBHOOK_SECRET` is left empty in `.env`, the endpoint operates in open development mode without rejecting requests.
+If `AZURE_WEBHOOK_SECRET` is left empty in development/test, the endpoint operates in open mode without rejecting requests. Do not expose this mode to an untrusted network.
 
 ---
 

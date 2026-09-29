@@ -37,8 +37,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_headers=["Accept", "Authorization", "Content-Type", "X-Azure-Webhook-Secret", "X-Alertmanager-Webhook-Secret"],
 )
 
 # Mount API v1 router

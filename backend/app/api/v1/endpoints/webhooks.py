@@ -80,10 +80,31 @@ async def _find_alert(session: AsyncSession, fingerprint: str, *, active_only: b
     return (await session.execute(statement)).scalar_one_or_none()
 
 
+def verify_alertmanager_webhook_secret(
+    x_alertmanager_webhook_secret: Optional[str] = Header(None, alias="X-Alertmanager-Webhook-Secret"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+) -> None:
+    expected_secret = (settings.ALERTMANAGER_WEBHOOK_SECRET or "").strip()
+    if not expected_secret:
+        if settings.APP_ENV.lower() not in {"development", "test"}:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Alertmanager webhook authentication is not configured.")
+        return
+
+    provided_secret = (x_alertmanager_webhook_secret or "").strip()
+    if not provided_secret and authorization:
+        scheme, separator, credentials = authorization.partition(" ")
+        if separator and scheme.lower() == "bearer":
+            provided_secret = credentials.strip()
+
+    if not provided_secret or not hmac.compare_digest(provided_secret, expected_secret):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Alertmanager webhook credentials.")
+
+
 @router.post("/alertmanager", status_code=status.HTTP_200_OK)
 async def receive_alertmanager_webhook(
     payload: AlertmanagerWebhookPayload,
     db: AsyncSession = Depends(get_db),
+    _auth: None = Depends(verify_alertmanager_webhook_secret),
 ) -> Dict[str, Any]:
     """Normalize Alertmanager notifications into the shared incident intake pipeline."""
     intake = IncidentIntakeService(db)
@@ -228,7 +249,8 @@ def verify_azure_webhook_secret(
     """Validate optional Azure Monitor Action Group webhook secret / authorization token."""
     expected_secret = (settings.AZURE_WEBHOOK_SECRET or "").strip()
     if not expected_secret:
-        # If no secret configured, allow request in open/dev mode
+        if settings.APP_ENV.lower() not in {"development", "test"}:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Azure webhook authentication is not configured.")
         return
 
     provided_secret = code or request.query_params.get("token") or request.query_params.get("secret")
@@ -459,7 +481,7 @@ async def receive_azure_monitor_webhook(
                     orch_state.current_step,
                 )
             except Exception as orch_exc:
-                logger.error("Incident Orchestrator encountered error: %s", orch_exc, exc_info=True)
+                logger.error("Incident Orchestrator failed while processing an Azure alert (error_type=%s)", type(orch_exc).__name__)
                 orchestrator_status = "orchestrator_failed"
 
         return {
@@ -490,7 +512,7 @@ async def receive_azure_monitor_webhook(
         await db.rollback()
         if isinstance(exc, HTTPException):
             raise
-        logger.error("Error processing Azure Monitor webhook: %s", exc, exc_info=True)
+        logger.error("Error processing Azure Monitor webhook (error_type=%s)", type(exc).__name__)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Azure Monitor webhook notification could not be processed.",

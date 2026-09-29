@@ -108,7 +108,7 @@ def test_hindsight_health_check_unreachable():
     health = service.check_health()
     assert health["healthy"] is False
     assert health["status"] == "unreachable"
-    assert "Connection refused" in health["error"]
+    assert health["error"] == "Hindsight health check failed."
 
 
 def test_create_memory_bank(hindsight_svc, mock_hindsight_client):
@@ -315,7 +315,7 @@ def test_graceful_degradation_on_api_exception():
     # Test retain error resilience
     retain_res = service.retain_incident({"incident_id": "INC-ERR", "affected_service": "auth"})
     assert retain_res["success"] is False
-    assert "503" in retain_res["error"]
+    assert retain_res["error"] == "Hindsight retain failed."
     
     # Test recall error resilience (returns empty list, doesn't crash)
     recall_res = service.recall_similar_incidents("auth error")
@@ -324,4 +324,4 @@ def test_graceful_degradation_on_api_exception():
     # Test reflect error resilience
     reflect_res = service.reflect_on_incident_history("auth failure patterns")
     assert reflect_res["success"] is False
-    assert "failed" in reflect_res["text"].lower()
+    assert reflect_res["text"] == "Hindsight reflection is unavailable."

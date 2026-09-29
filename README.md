@@ -114,7 +114,7 @@ Hindsight Memory Retain (Organizational Learning)
 - Docker (optional for local containerized deployment)
 
 ### 2. Configure Environment Variables
-Copy `.env.example` to `.env`:
+Copy `.env.example` to `.env` and replace the database password placeholder with a unique value (at least 16 characters before using staging or production):
 ```bash
 cp .env.example .env
 ```

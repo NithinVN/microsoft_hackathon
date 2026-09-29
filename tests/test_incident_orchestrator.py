@@ -14,7 +14,7 @@ def orchestrator() -> IncidentOrchestrator:
 
 
 def test_incident_orchestrator_successful_workflow(orchestrator: IncidentOrchestrator):
-    state = orchestrator.run("INC-H101")
+    state = orchestrator.run("INC-H101", approval_override={"approved": True, "reason": "approved by test operator"})
 
     assert isinstance(state, OrchestratorState)
     assert state.current_step == "END"
@@ -37,11 +37,30 @@ def test_incident_orchestrator_successful_workflow(orchestrator: IncidentOrchest
 
 def test_incident_orchestrator_handles_hindsight_unavailable(orchestrator: IncidentOrchestrator):
     with patch("backend.app.orchestration.incident_orchestrator.hindsight_service.is_configured", False):
-        state = orchestrator.run("INC-H101")
+        state = orchestrator.run("INC-H101", approval_override={"approved": True, "reason": "approved by test operator"})
 
     assert state.status in {"completed", "completed_with_warnings"}
     assert state.hindsight_status == "unavailable"
     assert any("Hindsight unavailable" in item for item in state.errors)
+
+
+def test_incident_orchestrator_requires_explicit_approval(orchestrator: IncidentOrchestrator):
+    state = orchestrator.run("INC-H101")
+
+    assert state.status == "blocked"
+    assert state.current_step == "HUMAN_APPROVAL"
+    assert state.execution is None
+    assert state.verification is None
+    assert state.postmortem is None
+    assert any("explicit human approval" in item.lower() for item in state.warnings)
+
+
+def test_incident_orchestrator_rejects_non_boolean_approval(orchestrator: IncidentOrchestrator):
+    state = orchestrator.run("INC-H101", approval_override={"approved": "true"})
+
+    assert state.status == "blocked"
+    assert state.execution is None
+    assert state.verification is None
 
 
 def test_incident_orchestrator_rejected_remediation_is_blocked(orchestrator: IncidentOrchestrator):

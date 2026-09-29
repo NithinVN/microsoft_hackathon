@@ -220,8 +220,16 @@ def test_orchestrator_execution_on_webhook(client: TestClient):
     assert response.status_code == 200
     body = response.json()
     assert body["action"] == "created"
-    assert body["orchestrator_status"] in {"completed", "completed_with_warnings"}
-    assert body["orchestrator_step"] == "END"
+    assert body["orchestrator_status"] == "blocked"
+    assert body["orchestrator_step"] == "HUMAN_APPROVAL"
+
+
+def test_azure_webhook_fails_closed_without_secret_in_production(client: TestClient):
+    payload = load_payload("azure_monitor_metric_firing.json")
+    with patch.object(settings, "APP_ENV", "production"), patch.object(settings, "AZURE_WEBHOOK_SECRET", ""):
+        response = client.post("/api/v1/webhooks/azure-monitor", json=payload)
+
+    assert response.status_code == 503
 
 
 def test_missing_azure_config_leaves_app_working(client: TestClient):

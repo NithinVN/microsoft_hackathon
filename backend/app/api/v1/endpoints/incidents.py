@@ -1,7 +1,9 @@
+import hmac
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.config import settings
 from backend.app.agents.incident_memory_agent import assess_incident_memory
 from backend.app.agents.time_machine_agent import _failed_fix_warning_for_incident, build_time_machine_analysis
 from backend.app.db.session import get_db
@@ -30,6 +32,20 @@ from backend.app.schemas.incident import (
 )
 
 router = APIRouter()
+
+
+def require_operator_authorization(authorization: Optional[str] = Header(None, alias="Authorization")) -> None:
+    if settings.APP_ENV.lower() in {"development", "test"}:
+        return
+
+    expected_token = (settings.OPERATOR_API_TOKEN or "").strip()
+    if not expected_token:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Operator authorization is not configured.")
+
+    scheme, separator, credentials = (authorization or "").partition(" ")
+    provided_token = credentials.strip() if separator and scheme.lower() == "bearer" else ""
+    if not provided_token or not hmac.compare_digest(provided_token, expected_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Operator authorization is required.")
 
 
 @router.post("", response_model=IncidentRead, status_code=status.HTTP_201_CREATED)
@@ -222,6 +238,7 @@ async def store_action_execution(
     id: int,
     data: ActionExecutionCreate,
     db: AsyncSession = Depends(get_db),
+    _operator: None = Depends(require_operator_authorization),
 ) -> ActionExecutionRead:
     """Store human approval, execution output, and verification status."""
     repo = IncidentRepository(db)
@@ -252,6 +269,7 @@ async def record_approval_decision(
     id: int,
     data: ApprovalDecisionCreate,
     db: AsyncSession = Depends(get_db),
+    _operator: None = Depends(require_operator_authorization),
 ) -> ApprovalDecisionRead:
     """Record the engineer decision, including simulate-only execution output and recovery status."""
     repo = IncidentRepository(db)

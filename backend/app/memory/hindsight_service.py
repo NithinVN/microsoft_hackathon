@@ -29,6 +29,12 @@ from backend.app.core.config import settings
 from backend.app.core.logging import logger
 
 
+def _discard_awaitable(value: Any) -> None:
+    close = getattr(value, "close", None)
+    if callable(close):
+        close()
+
+
 class HindsightService:
     """Enterprise organizational memory service powered by official Hindsight Cloud SDK."""
 
@@ -117,8 +123,7 @@ class HindsightService:
         except Exception as exc:
             logger.error(
                 "Failed to instantiate Hindsight client",
-                extra={"error": str(exc), "base_url": self.base_url},
-                exc_info=True,
+                extra={"error_type": type(exc).__name__, "base_url": self.base_url},
             )
             return None
 
@@ -164,7 +169,7 @@ class HindsightService:
             except Exception as bank_exc:
                 logger.debug(
                     "Memory bank not yet created or inaccessible",
-                    extra={"bank_id": self.bank_id, "error": str(bank_exc)},
+                    extra={"bank_id": self.bank_id, "error_type": type(bank_exc).__name__},
                 )
 
             return {
@@ -178,25 +183,25 @@ class HindsightService:
         except ApiException as api_err:
             logger.warning(
                 "Hindsight API returned error during health check",
-                extra={"status": api_err.status if hasattr(api_err, "status") else None, "error": str(api_err)},
+                extra={"status": api_err.status if hasattr(api_err, "status") else None},
             )
             return {
                 "healthy": False,
                 "status": "api_error",
                 "status_code": getattr(api_err, "status", None),
-                "error": str(api_err),
+                "error": "Hindsight health check failed.",
                 "base_url": self.base_url,
                 "bank_id": self.bank_id,
             }
         except Exception as exc:
             logger.warning(
                 "Hindsight connection check failed",
-                extra={"error": str(exc), "base_url": self.base_url},
+                extra={"error_type": type(exc).__name__, "base_url": self.base_url},
             )
             return {
                 "healthy": False,
                 "status": "unreachable",
-                "error": str(exc),
+                "error": "Hindsight health check failed.",
                 "base_url": self.base_url,
                 "bank_id": self.bank_id,
             }
@@ -264,11 +269,11 @@ class HindsightService:
                     return {"success": True, "bank_id": target_bank, "created": False, "details": config}
                 except Exception:
                     return {"success": True, "bank_id": target_bank, "created": False}
-            logger.error("ApiException creating Hindsight memory bank", extra={"error": str(api_err), "bank_id": target_bank})
-            return {"success": False, "bank_id": target_bank, "error": str(api_err)}
+            logger.error("Hindsight memory-bank creation failed", extra={"error_type": type(api_err).__name__, "bank_id": target_bank})
+            return {"success": False, "bank_id": target_bank, "error": "Hindsight memory-bank creation failed."}
         except Exception as exc:
-            logger.error("Error creating Hindsight memory bank", extra={"error": str(exc), "bank_id": target_bank}, exc_info=True)
-            return {"success": False, "bank_id": target_bank, "error": str(exc)}
+            logger.error("Hindsight memory-bank creation failed", extra={"error_type": type(exc).__name__, "bank_id": target_bank})
+            return {"success": False, "bank_id": target_bank, "error": "Hindsight memory-bank creation failed."}
 
     # =========================================================================
     # 2. Retain Incident
@@ -870,7 +875,20 @@ class HindsightService:
         tags = [f"service:{service.lower()}"] if service else None
 
         try:
-            logger.info("Executing Hindsight reflect query", extra={"bank_id": target_bank, "query": query})
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                logger.warning("Hindsight reflect skipped because its synchronous SDK cannot run inside an active event loop.", extra={"bank_id": target_bank})
+                return {
+                    "success": False,
+                    "text": "Hindsight reflection is unavailable.",
+                    "based_on": [],
+                    "error": "Hindsight reflection is unavailable.",
+                }
+
+            logger.info("Executing Hindsight reflect query", extra={"bank_id": target_bank})
             reflect_resp = client.reflect(
                 bank_id=target_bank,
                 query=query,
@@ -880,6 +898,15 @@ class HindsightService:
                 tags_match="any" if tags else None,
                 include_facts=True,
             )
+            if inspect.isawaitable(reflect_resp):
+                _discard_awaitable(reflect_resp)
+                logger.warning("Hindsight reflect returned an awaitable; treating it as unavailable.", extra={"bank_id": target_bank})
+                return {
+                    "success": False,
+                    "text": "Hindsight reflection is unavailable.",
+                    "based_on": [],
+                    "error": "Hindsight reflection is unavailable.",
+                }
 
             response_text = getattr(reflect_resp, "text", "")
             based_on_items = []
@@ -899,20 +926,20 @@ class HindsightService:
                 "usage": getattr(reflect_resp, "usage", None),
             }
         except ApiException as api_err:
-            logger.error("ApiException during Hindsight reflect", extra={"error": str(api_err), "bank_id": target_bank})
+            logger.error("Hindsight reflect failed", extra={"error_type": type(api_err).__name__, "bank_id": target_bank})
             return {
                 "success": False,
-                "text": f"Hindsight reflection error: {api_err}",
+                "text": "Hindsight reflection is unavailable.",
                 "based_on": [],
-                "error": str(api_err),
+                "error": "Hindsight reflection is unavailable.",
             }
         except Exception as exc:
-            logger.error("Error during Hindsight reflect", extra={"error": str(exc), "bank_id": target_bank}, exc_info=True)
+            logger.error("Hindsight reflect failed", extra={"error_type": type(exc).__name__, "bank_id": target_bank})
             return {
                 "success": False,
-                "text": f"Hindsight reflection failed: {exc}",
+                "text": "Hindsight reflection is unavailable.",
                 "based_on": [],
-                "error": str(exc),
+                "error": "Hindsight reflection is unavailable.",
             }
 
     # =========================================================================
@@ -961,17 +988,16 @@ class HindsightService:
             }
         except ApiException as api_err:
             logger.error(
-                "ApiException during Hindsight retain",
-                extra={"error": str(api_err), "bank_id": bank_id, "doc": document_id},
+                "Hindsight retain failed",
+                extra={"error_type": type(api_err).__name__, "bank_id": bank_id, "doc": document_id},
             )
-            return {"success": False, "error": str(api_err), "bank_id": bank_id}
+            return {"success": False, "error": "Hindsight retain failed.", "bank_id": bank_id}
         except Exception as exc:
             logger.error(
-                "Error executing Hindsight retain",
-                extra={"error": str(exc), "bank_id": bank_id, "doc": document_id},
-                exc_info=True,
+                "Hindsight retain failed",
+                extra={"error_type": type(exc).__name__, "bank_id": bank_id, "doc": document_id},
             )
-            return {"success": False, "error": str(exc), "bank_id": bank_id}
+            return {"success": False, "error": "Hindsight retain failed.", "bank_id": bank_id}
 
     def _execute_recall(
         self,
@@ -984,11 +1010,19 @@ class HindsightService:
         """Internal helper to execute Hindsight recall with safety, parsing results gracefully."""
         client = self.get_client()
         if not client:
-            logger.warning("Hindsight client unavailable; skipping recall", extra={"query": query})
+            logger.warning("Hindsight client unavailable; skipping recall")
             return []
 
         try:
-            logger.info("Executing Hindsight recall", extra={"bank_id": bank_id, "query": query, "tags": tags})
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                logger.warning("Hindsight recall skipped because its synchronous SDK cannot run inside an active event loop.", extra={"bank_id": bank_id})
+                return []
+
+            logger.info("Executing Hindsight recall", extra={"bank_id": bank_id, "tags": tags})
             resp = client.recall(
                 bank_id=bank_id,
                 query=query,
@@ -998,6 +1032,7 @@ class HindsightService:
                 budget="mid",
             )
             if inspect.isawaitable(resp):
+                _discard_awaitable(resp)
                 logger.warning("Hindsight recall returned an awaitable; treating as unavailable to avoid un-awaited coroutine warnings.")
                 return []
 
@@ -1018,10 +1053,10 @@ class HindsightService:
 
             return results
         except ApiException as api_err:
-            logger.error("ApiException during Hindsight recall", extra={"error": str(api_err), "query": query})
+            logger.error("Hindsight recall failed", extra={"error_type": type(api_err).__name__, "bank_id": bank_id})
             return []
         except Exception as exc:
-            logger.error("Error executing Hindsight recall", extra={"error": str(exc), "query": query}, exc_info=True)
+            logger.error("Hindsight recall failed", extra={"error_type": type(exc).__name__, "bank_id": bank_id})
             return []
 
 

@@ -1,8 +1,30 @@
 import uuid
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from backend.app.core.config import settings
 from backend.app.main import app
+
+
+def test_human_approval_requires_operator_token_outside_development(client: TestClient):
+    payload = {
+        "engineer": "eng_amy",
+        "action": "approve",
+        "original_recommendation": "Increase database connection pool from 50 to 100",
+        "reason": "Reviewed the runbook and blast radius.",
+    }
+
+    with patch.object(settings, "APP_ENV", "staging"), patch.object(settings, "OPERATOR_API_TOKEN", "operator-token-for-tests"):
+        unauthorized = client.post("/api/v1/incidents/1/approval", json=payload)
+        authorized = client.post(
+            "/api/v1/incidents/1/approval",
+            json=payload,
+            headers={"Authorization": "Bearer operator-token-for-tests"},
+        )
+
+    assert unauthorized.status_code == 401
+    assert authorized.status_code == 404
 
 
 def test_human_approval_simulation_records_execution_and_marks_recovered(client: TestClient):

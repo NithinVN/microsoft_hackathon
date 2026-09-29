@@ -16,7 +16,7 @@ Start the application and optional monitoring services from the repository root:
 docker compose --profile monitoring up --build -d
 ```
 
-Open Prometheus at `http://localhost:9090` and Alertmanager at `http://localhost:9093`. The sample Alertmanager receiver posts to the Compose backend service at `http://backend:8000/api/v1/webhooks/alertmanager`.
+Open Prometheus at `http://localhost:9090` and Alertmanager at `http://localhost:9093`. The sample Alertmanager receiver posts to the Compose backend service at `http://backend:8000/api/v1/webhooks/alertmanager`. Development and test environments accept the sample webhook on the private Compose network. In staging and production, configure `ALERTMANAGER_WEBHOOK_SECRET`; the endpoint rejects requests with HTTP 503 if the secret is missing, and otherwise requires `X-Alertmanager-Webhook-Secret` or `Authorization: Bearer <secret>`.
 
 To run Prometheus and Alertmanager in containers while running FastAPI directly on the host, update the receiver URL in `monitoring/alertmanager/alertmanager.yml` to:
 
@@ -24,7 +24,7 @@ To run Prometheus and Alertmanager in containers while running FastAPI directly 
 http://host.docker.internal:8000/api/v1/webhooks/alertmanager
 ```
 
-Then start the local backend using the repository's normal Uvicorn command and start the monitoring profile. Do not expose the webhook publicly without network restrictions or an authentication layer; the sample receiver assumes a trusted local Docker network.
+Then start the local backend using the repository's normal Uvicorn command and start the monitoring profile. Do not expose the webhook publicly without authentication and network restrictions; the sample receiver assumes a trusted local Docker network. Keep the shared secret in a secret manager and configure Alertmanager's HTTP authorization using a mounted credentials file in production.
 
 ## Demo alert rules
 

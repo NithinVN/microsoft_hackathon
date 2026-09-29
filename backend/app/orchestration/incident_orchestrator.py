@@ -240,11 +240,16 @@ class IncidentOrchestrator:
         state.remediation_plan = remediation_plan
         self._record(state, "REMEDIATION", "ok", "Remediation plan generated.")
 
-        approval = approval_override or {"approved": True, "reason": "default approval for simulation workflow"}
-        if not bool(approval.get("approved", True)):
+        approval = approval_override or {}
+        if approval.get("approved") is not True:
             state.status = "blocked"
-            self._add_error(state, "rejected remediation: the remediation action was rejected by a human operator.")
-            self._record(state, "HUMAN_APPROVAL", "blocked", str(approval.get("reason") or "Human rejected the remediation."))
+            if approval_override is None:
+                self._add_warning(state, "Remediation is awaiting explicit human approval; no execution or recovery was recorded.")
+                approval_reason = "Explicit human approval is required."
+            else:
+                self._add_error(state, "rejected remediation: the remediation action was rejected by a human operator.")
+                approval_reason = str(approval.get("reason") or "Human rejected the remediation.")
+            self._record(state, "HUMAN_APPROVAL", "blocked", approval_reason)
             state.current_step = "HUMAN_APPROVAL"
             return state
 

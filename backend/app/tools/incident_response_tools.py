@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATASET_PATH = PROJECT_ROOT / "data" / "historical_incidents.json"
@@ -59,6 +59,10 @@ class IncidentToolError(Exception):
     """Raised for validation or operational safety failures in the incident tool layer."""
 
 
+class ToolInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class ToolExecutionResult(BaseModel):
     ok: bool = True
     tool: str
@@ -74,7 +78,7 @@ class ToolSpec(BaseModel):
     function: Any = Field(exclude=True)
 
 
-class GetIncidentDetailsInput(BaseModel):
+class GetIncidentDetailsInput(ToolInput):
     incident_id: str = Field(..., min_length=3, max_length=50)
 
     @field_validator("incident_id")
@@ -92,7 +96,7 @@ class GetIncidentDetailsOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
-class ServiceMetricsInput(BaseModel):
+class ServiceMetricsInput(ToolInput):
     service: str
     limit: int = Field(default=3, ge=1, le=10)
 
@@ -114,7 +118,7 @@ class ServiceMetricsOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
-class ServiceLogsInput(BaseModel):
+class ServiceLogsInput(ToolInput):
     service: str
     limit: int = Field(default=5, ge=1, le=20)
 
@@ -136,7 +140,7 @@ class ServiceLogsOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
-class RecentDeploymentsInput(BaseModel):
+class RecentDeploymentsInput(ToolInput):
     service: str
     limit: int = Field(default=5, ge=1, le=10)
 
@@ -158,7 +162,7 @@ class RecentDeploymentsOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
-class ServiceDependenciesInput(BaseModel):
+class ServiceDependenciesInput(ToolInput):
     service: str
 
     @field_validator("service")
@@ -179,7 +183,7 @@ class ServiceDependenciesOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
-class RecentIncidentEventsInput(BaseModel):
+class RecentIncidentEventsInput(ToolInput):
     service: str
     limit: int = Field(default=10, ge=1, le=20)
 
@@ -201,7 +205,7 @@ class RecentIncidentEventsOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
-class RecallSimilarIncidentsInput(BaseModel):
+class RecallSimilarIncidentsInput(ToolInput):
     query: str = Field(..., min_length=3, max_length=500)
     service: Optional[str] = None
     limit: int = Field(default=5, ge=1, le=10)
@@ -234,7 +238,7 @@ class RecallSimilarIncidentsOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
-class RecallFailedFixesInput(BaseModel):
+class RecallFailedFixesInput(ToolInput):
     service: Optional[str] = None
     action_type: Optional[str] = None
     limit: int = Field(default=5, ge=1, le=10)
@@ -278,9 +282,9 @@ class RecallSuccessfulFixesOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
-class GetRunbookInput(BaseModel):
+class GetRunbookInput(ToolInput):
     service: str
-    scenario: Optional[str] = None
+    scenario: Optional[str] = Field(default=None, max_length=100)
 
     @field_validator("service")
     @classmethod
@@ -300,7 +304,7 @@ class GetRunbookOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
-class ProposeRemediationInput(BaseModel):
+class ProposeRemediationInput(ToolInput):
     service: str
     incident_id: Optional[str] = None
     symptom_summary: str = Field(..., min_length=5, max_length=1000)
@@ -343,7 +347,7 @@ class ProposeRemediationOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
-class SimulateRemediationInput(BaseModel):
+class SimulateRemediationInput(ToolInput):
     service: str
     action_type: str = Field(..., min_length=3, max_length=80)
     incident_id: Optional[str] = None
@@ -386,7 +390,7 @@ class SimulateRemediationOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
-class RecordEngineerFeedbackInput(BaseModel):
+class RecordEngineerFeedbackInput(ToolInput):
     incident_id: str = Field(..., min_length=3, max_length=50)
     engineer_id: str = Field(..., min_length=2, max_length=100)
     rating: int = Field(..., ge=1, le=5)
@@ -464,6 +468,14 @@ def _find_incidents_for_service(service: str) -> List[Dict[str, Any]]:
 
 
 def _safe_error(code: str, message: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    safe_details = dict(details or {})
+    errors = safe_details.get("errors")
+    if isinstance(errors, list):
+        safe_details["errors"] = [
+            {key: error[key] for key in ("loc", "msg", "type") if key in error}
+            for error in errors
+            if isinstance(error, dict)
+        ]
     return {
         "ok": False,
         "tool": "",
@@ -471,7 +483,7 @@ def _safe_error(code: str, message: str, details: Optional[Dict[str, Any]] = Non
         "error": {
             "code": code,
             "message": message,
-            "details": details or {},
+            "details": safe_details,
         },
     }
 
@@ -504,8 +516,8 @@ def get_incident_details(payload: GetIncidentDetailsInput | Dict[str, Any]) -> D
         params = GetIncidentDetailsInput.model_validate(payload)
     except ValidationError as exc:
         return _safe_error("validation_error", "Invalid input", {"errors": exc.errors()})
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        return _safe_error("validation_error", str(exc))
+    except Exception:  # pragma: no cover - defensive fallback
+        return _safe_error("validation_error", "Invalid input")
 
     incident = _find_incident_by_id(params.incident_id)
     if incident is None:
@@ -1146,15 +1158,15 @@ def list_tool_specs() -> List[Dict[str, Any]]:
 def execute_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     tool = TOOL_REGISTRY.get(tool_name)
     if tool is None:
-        return _safe_error("unknown_tool", f"Unknown tool: {tool_name}")
+        return _safe_error("unknown_tool", "Unknown tool requested")
     try:
         return tool.function(arguments)
-    except IncidentToolError as exc:
-        return _safe_error("tool_execution_error", str(exc))
+    except IncidentToolError:
+        return _safe_error("tool_execution_error", "Tool execution failed")
     except ValidationError as exc:
         return _safe_error("validation_error", "Tool validation failed", {"errors": exc.errors()})
-    except Exception as exc:  # pragma: no cover - last-resort guard
-        return _safe_error("tool_execution_error", str(exc))
+    except Exception:  # pragma: no cover - last-resort guard
+        return _safe_error("tool_execution_error", "Tool execution failed")
 
 
 __all__ = [

@@ -1,0 +1,31 @@
+{
+  "schemaId": "AzureMonitorMetricAlertClassic",
+  "data": {
+    "status": "Activated",
+    "context": {
+      "timestamp": "2026-09-29T10:30:00Z",
+      "id": "/subscriptions/33333333-4444-5555-6666-777777777777/resourceGroups/rg-prod/providers/microsoft.insights/alertrules/classic-db-connections",
+      "name": "DatabaseConnectionsThresholdExceeded",
+      "description": "Database connection pool reached 95% capacity",
+      "conditionType": "Metric",
+      "severity": "1",
+      "condition": {
+        "metricName": "active_connections",
+        "metricUnit": "Count",
+        "metricValue": "95",
+        "threshold": "90",
+        "windowSize": "5",
+        "timeAggregation": "Average",
+        "operator": "GreaterThan"
+      },
+      "resourceName": "database",
+      "resourceType": "microsoft.sql/servers/databases",
+      "resourceRegion": "eastus",
+      "subscriptionId": "33333333-4444-5555-6666-777777777777"
+    },
+    "properties": {
+      "service": "database",
+      "environment": "production"
+    }
+  }
+}

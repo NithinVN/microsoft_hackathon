@@ -1,0 +1,32 @@
+{
+  "receiver": "incidentmind-webhook",
+  "status": "resolved",
+  "version": "4",
+  "groupKey": "{service=\"payment-api\"}:alertname=HighApiErrorRate",
+  "externalURL": "http://alertmanager:9093",
+  "groupLabels": {"service": "payment-api"},
+  "commonLabels": {"service": "payment-api", "severity": "critical"},
+  "commonAnnotations": {"team": "payments-sre"},
+  "alerts": [
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "HighApiErrorRate",
+        "severity": "critical",
+        "service": "payment-api",
+        "instance": "payment-api:8000",
+        "environment": "production"
+      },
+      "annotations": {
+        "summary": "Payment API error rate is above threshold",
+        "description": "5xx response ratio returned below 5%.",
+        "runbook_url": "https://runbooks.example.test/payment-api/errors"
+      },
+      "startsAt": "2026-09-29T10:15:00Z",
+      "endsAt": "2026-09-29T10:23:15Z",
+      "generatorURL": "http://prometheus:9090/graph?g0.expr=api_error_rate",
+      "fingerprint": "a4d5d78ef105e706d1ad4574b6d5f9d1",
+      "value": "0.012"
+    }
+  ]
+}

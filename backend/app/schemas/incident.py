@@ -189,12 +189,20 @@ class PostmortemCreate(BaseModel):
     duration_minutes: int = Field(default=0, ge=0)
     root_cause: str = Field(..., min_length=5)
     trigger_event: str = Field(default="")
+    incident_summary: str = Field(default="")
+    impact: str = Field(default="")
+    detection: str = Field(default="")
     what_happened: str = Field(default="")
     what_worked: List[str] = Field(default_factory=list)
     what_failed: List[str] = Field(default_factory=list)
     why_it_failed: str = Field(default="")
+    contributing_factors: str = Field(default="")
+    actual_outcome: str = Field(default="")
+    final_resolution: str = Field(default="")
     engineer_corrections: List[str] = Field(default_factory=list)
+    engineer_feedback: str = Field(default="")
     lessons_learned: List[str] = Field(default_factory=list)
+    future_prevention: str = Field(default="")
     corrective_actions: List[str] = Field(default_factory=list)
     timeline: List[Dict[str, Any]] = Field(default_factory=list)
     hindsight_retained: bool = Field(default=False)
@@ -210,12 +218,20 @@ class PostmortemRead(BaseModel):
     duration_minutes: int
     root_cause: str
     trigger_event: str
+    incident_summary: str = ""
+    impact: str = ""
+    detection: str = ""
     what_happened: str = ""
     what_worked: List[str] = Field(default_factory=list)
     what_failed: List[str] = Field(default_factory=list)
     why_it_failed: str = ""
+    contributing_factors: str = ""
+    actual_outcome: str = ""
+    final_resolution: str = ""
     engineer_corrections: List[str] = Field(default_factory=list)
+    engineer_feedback: str = ""
     lessons_learned: List[str] = Field(default_factory=list)
+    future_prevention: str = ""
     corrective_actions: List[str]
     timeline: List[Dict[str, Any]]
     hindsight_retained: bool

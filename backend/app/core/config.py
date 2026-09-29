@@ -82,5 +82,19 @@ class Settings(BaseSettings):
     # Incident Simulator Configuration
     SIMULATOR_DETERMINISTIC: bool = True
 
+    # Azure Monitor Webhook Configuration (Optional)
+    AZURE_WEBHOOK_SECRET: str = Field(
+        default="",
+        description="Optional shared secret or auth token for Azure Monitor Action Group webhook authentication",
+    )
+    AZURE_DEFAULT_SERVICE: str = Field(
+        default="azure-service",
+        description="Default affected service name if not extractable from alert payload",
+    )
+    AZURE_AUTO_ORCHESTRATE: bool = Field(
+        default=False,
+        description="Whether incoming Azure alerts should automatically run full agent orchestration",
+    )
+
 
 settings = Settings()

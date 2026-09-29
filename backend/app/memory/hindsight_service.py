@@ -46,11 +46,20 @@ class HindsightService:
         self.timeout = timeout or settings.HINDSIGHT_TIMEOUT_SECONDS
         self.max_attempts = max_attempts or settings.HINDSIGHT_MAX_RETRIES
         self._client: Optional[Hindsight] = None
+        self._is_configured = bool(self.base_url and self.bank_id)
 
     @property
     def is_configured(self) -> bool:
         """Returns True if minimum configuration is provided."""
-        return bool(self.base_url and self.bank_id)
+        return bool(self._is_configured and self.base_url and self.bank_id)
+
+    @is_configured.setter
+    def is_configured(self, value: bool) -> None:
+        self._is_configured = bool(value)
+
+    @is_configured.deleter
+    def is_configured(self) -> None:
+        self._is_configured = bool(self.base_url and self.bank_id)
 
     def close(self) -> None:
         """Closes any underlying connection pools and HTTP sessions."""
@@ -743,6 +752,94 @@ class HindsightService:
             tags_match="any",
             limit=10,
         )
+
+    def recall_organizational_memories(
+        self,
+        query: str,
+        service: Optional[str] = None,
+        limit: int = 5,
+        bank_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Recall categorized organizational records directly from Hindsight."""
+        target_bank = bank_id or self.bank_id
+        health = self.check_health()
+        empty_result: Dict[str, Any] = {
+            "status": "unavailable",
+            "bank_id": target_bank,
+            "health": health,
+            "categories": {
+                "historical_incidents": [],
+                "root_causes": [],
+                "successful_fixes": [],
+                "failed_fixes": [],
+                "engineer_feedback": [],
+                "postmortem_lessons": [],
+            },
+            "retrieved_memories": [],
+            "agent_evidence": [],
+        }
+        if not health.get("healthy"):
+            return empty_result
+
+        service_prefix = f"{service} " if service else ""
+        categories = {
+            "historical_incidents": self.recall_similar_incidents(
+                query=query, service=service, limit=limit, bank_id=target_bank
+            ),
+            "root_causes": self._execute_recall(
+                bank_id=target_bank,
+                query=f"{service_prefix}root cause {query}",
+                tags=["root_cause"],
+                limit=limit,
+            ),
+            "successful_fixes": self.recall_successful_remediations(
+                service=service, query=query, bank_id=target_bank
+            )[:limit],
+            "failed_fixes": self.recall_failed_remediations(
+                service=service, query=query, bank_id=target_bank
+            )[:limit],
+            "engineer_feedback": self._execute_recall(
+                bank_id=target_bank,
+                query=f"{service_prefix}engineer feedback {query}",
+                tags=["feedback"],
+                limit=limit,
+            ),
+            "postmortem_lessons": self._execute_recall(
+                bank_id=target_bank,
+                query=f"{service_prefix}postmortem lessons learned {query}",
+                tags=["postmortem", "lessons_learned"],
+                tags_match="any",
+                limit=limit,
+            ),
+        }
+
+        memories_by_id: Dict[str, Dict[str, Any]] = {}
+        agent_evidence: List[Dict[str, Any]] = []
+        for category, records in categories.items():
+            for record in records:
+                memory_id = str(record.get("id") or f"anonymous-{len(agent_evidence)}")
+                normalized = {
+                    "id": record.get("id"),
+                    "text": record.get("text") or "",
+                    "type": record.get("type") or "memory",
+                    "tags": record.get("tags") or [],
+                    "metadata": record.get("metadata") or {},
+                    "context": record.get("context"),
+                    "score": record.get("score"),
+                    "category": category,
+                    "source": "Hindsight",
+                }
+                memories_by_id.setdefault(memory_id, normalized)
+                agent_evidence.append(normalized)
+
+        return {
+            "status": "available" if memories_by_id else "empty",
+            "bank_id": target_bank,
+            "health": health,
+            "categories": categories,
+            "retrieved_memories": list(memories_by_id.values()),
+            "agent_evidence": agent_evidence,
+        }
 
     # =========================================================================
     # 11. Reflect on Incident History

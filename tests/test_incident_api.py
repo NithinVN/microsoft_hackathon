@@ -99,6 +99,7 @@ def test_api_incident_lifecycle(client: TestClient):
     assert rem_resp.status_code == 201
     assert rem_resp.json()["action_key"] == "scale_connections"
 
+
     # 5. Store postmortem
     pm_payload = {
         "title": "API Gateway Latency Postmortem",
@@ -119,3 +120,38 @@ def test_api_incident_lifecycle(client: TestClient):
     assert list_resp.status_code == 200
     incidents = list_resp.json()
     assert any(i["incident_id"] == unique_id for i in incidents)
+
+
+def test_organizational_memory_route_preserves_current_incident_context(client: TestClient, monkeypatch):
+    from backend.app.api.v1.endpoints import incidents
+
+    monkeypatch.setattr(
+        incidents.hindsight_service,
+        "recall_organizational_memories",
+        lambda **kwargs: {
+            "status": "available",
+            "bank_id": "test-bank",
+            "health": {"healthy": True, "status": "connected"},
+            "categories": {},
+            "retrieved_memories": [{"id": "memory-1", "text": "Observed pool starvation."}],
+            "agent_evidence": [{"id": "memory-1", "text": "Observed pool starvation."}],
+        },
+    )
+
+    response = client.get(
+        "/api/v1/incidents/organizational-memory",
+        params={
+            "incident_id": "INC-7041",
+            "service": "payment-processor",
+            "query": "connection pool saturation",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["current_incident"] == {
+        "incident_id": "INC-7041",
+        "service": "payment-processor",
+        "query": "connection pool saturation",
+    }
+    assert body["retrieved_memories"][0]["id"] == "memory-1"

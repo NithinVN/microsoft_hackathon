@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.agents.incident_memory_agent import assess_incident_memory
 from backend.app.agents.time_machine_agent import _failed_fix_warning_for_incident, build_time_machine_analysis
 from backend.app.db.session import get_db
+from backend.app.memory.hindsight_service import hindsight_service
 from backend.app.repositories.incident_repository import IncidentRepository
 from backend.app.schemas.incident import (
     ActionExecutionCreate,
@@ -62,6 +63,29 @@ async def list_incidents(
     repo = IncidentRepository(db)
     incidents = await repo.list_incidents(status=status, severity=severity, limit=limit, offset=offset)
     return [IncidentRead.model_validate(inc) for inc in incidents]
+
+
+@router.get("/organizational-memory")
+async def get_organizational_memory(
+    incident_id: str = Query(..., min_length=3, max_length=50),
+    service: str = Query(..., min_length=2, max_length=100),
+    query: str = Query(..., min_length=3, max_length=500),
+    limit: int = Query(5, ge=1, le=10),
+) -> dict:
+    """Return categorized Hindsight records for the selected incident context."""
+    result = hindsight_service.recall_organizational_memories(
+        query=query,
+        service=service,
+        limit=limit,
+    )
+    return {
+        "current_incident": {
+            "incident_id": incident_id,
+            "service": service,
+            "query": query,
+        },
+        **result,
+    }
 
 
 @router.get("/{incident_id}", response_model=IncidentRead)

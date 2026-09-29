@@ -5,8 +5,7 @@ from fastapi.testclient import TestClient
 from backend.app.main import app
 
 
-def test_human_approval_simulation_records_execution_and_marks_recovered():
-    client = TestClient(app)
+def test_human_approval_simulation_records_execution_and_marks_recovered(client: TestClient):
     incident_id = f"INC-APP-{uuid.uuid4().hex[:6]}"
 
     create = client.post(
@@ -48,8 +47,7 @@ def test_human_approval_simulation_records_execution_and_marks_recovered():
     assert body["execution_result"]["after"]["error_rate_pct"] == 2
 
 
-def test_human_approval_records_modified_recommendation_without_shell_execution():
-    client = TestClient(app)
+def test_human_approval_records_modified_recommendation_without_shell_execution(client: TestClient):
     incident_id = f"INC-APP-{uuid.uuid4().hex[:6]}"
 
     create = client.post(

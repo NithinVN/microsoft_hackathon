@@ -1,0 +1,43 @@
+{
+  "schemaId": "azureMonitorCommonAlertSchema",
+  "data": {
+    "essentials": {
+      "alertId": "/subscriptions/11111111-2222-3333-4444-555555555555/providers/Microsoft.AlertsManagement/alerts/c26444f6-8c46-4074-b97f-1d377484d852",
+      "alertRule": "High CPU Percentage",
+      "severity": "Sev1",
+      "signalType": "Metric",
+      "monitorCondition": "Resolved",
+      "monitoringService": "Platform",
+      "alertTargetIDs": [
+        "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/rg-prod/providers/microsoft.compute/virtualmachines/payment-api"
+      ],
+      "originAlertId": "c26444f6-8c46-4074-b97f-1d377484d852",
+      "firedDateTime": "2026-09-29T10:15:00.1234567Z",
+      "resolvedDateTime": "2026-09-29T10:28:45.9876543Z",
+      "description": "CPU percentage dropped below 90% threshold",
+      "essentialsVersion": "1.0",
+      "alertContextVersion": "1.0"
+    },
+    "alertContext": {
+      "properties": null,
+      "conditionType": "SingleResourceMultipleMetricCriteria",
+      "condition": {
+        "windowSize": "PT5M",
+        "allOf": [
+          {
+            "metricName": "Percentage CPU",
+            "metricNamespace": "Microsoft.Compute/virtualMachines",
+            "operator": "GreaterThan",
+            "threshold": "90",
+            "timeAggregation": "Average",
+            "metricValue": 52.1
+          }
+        ]
+      }
+    },
+    "customProperties": {
+      "service": "payment-api",
+      "environment": "production"
+    }
+  }
+}

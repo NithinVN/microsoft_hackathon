@@ -17,6 +17,8 @@ from backend.app.tools.incident_response_tools import (
     simulate_remediation,
     record_engineer_feedback,
     list_tool_specs,
+    register_runtime_incident,
+    clear_runtime_incidents,
 )
 
 __all__ = [
@@ -38,4 +40,6 @@ __all__ = [
     "simulate_remediation",
     "record_engineer_feedback",
     "list_tool_specs",
+    "register_runtime_incident",
+    "clear_runtime_incidents",
 ]

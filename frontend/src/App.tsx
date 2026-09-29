@@ -1,11 +1,12 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   Activity,
+  ArrowDown,
   ArrowRight,
   BrainCircuit,
-  CircleAlert,
   Clock3,
   Database,
+  RefreshCw,
   HeartPulse,
   Layers3,
   MemoryStick,
@@ -16,7 +17,7 @@ import {
   TriangleAlert,
 } from 'lucide-react';
 import { MOCK_SCENARIOS } from './mock/incidentScenarios';
-import { fetchHealth, getIncidentMemory, HealthCheckResponse, IncidentMemoryResult } from './api/client';
+import { fetchHealth, getOrganizationalMemory, HealthCheckResponse, OrganizationalMemoryCategory, OrganizationalMemoryResult } from './api/client';
 import type { IncidentScenario } from './types/incident';
 import './App.css';
 
@@ -36,7 +37,7 @@ const screens: Array<{ key: ScreenKey; label: string; icon: any }> = [
   { key: 'dashboard', label: 'Dashboard', icon: Layers3 },
   { key: 'activeIncident', label: 'Active Incident', icon: Activity },
   { key: 'timeline', label: 'Incident Timeline', icon: Clock3 },
-  { key: 'memory', label: 'Hindsight Memory', icon: MemoryStick },
+  { key: 'memory', label: 'Organizational Memory', icon: MemoryStick },
   { key: 'diagnosis', label: 'Diagnosis', icon: BrainCircuit },
   { key: 'blastRadius', label: 'Blast Radius', icon: Network },
   { key: 'timeMachine', label: 'Time Machine', icon: TimerReset },
@@ -45,7 +46,15 @@ const screens: Array<{ key: ScreenKey; label: string; icon: any }> = [
   { key: 'learning', label: 'Learning', icon: Radar },
 ];
 
-const sourcePill = (source: 'Current telemetry' | 'Hindsight' | 'RAG') => (
+type EvidenceSource = 'Current telemetry' | 'Hindsight' | 'RAG';
+
+const evidenceSourceFor = (text: string): EvidenceSource => {
+  if (/hindsight|historical|memory recall|prior incident|INC-\d+/i.test(text)) return 'Hindsight';
+  if (/runbook|approved standard operation|section \d/i.test(text)) return 'RAG';
+  return 'Current telemetry';
+};
+
+const sourcePill = (source: EvidenceSource) => (
   <span className={`evidence-pill evidence-pill--${source.toLowerCase().replace(/\s+/g, '-')}`}>
     {source}
   </span>
@@ -53,15 +62,71 @@ const sourcePill = (source: 'Current telemetry' | 'Hindsight' | 'RAG') => (
 
 const severityToClass = (severity: string) => severity === 'SEV-1' ? 'severity--sev1' : severity === 'SEV-2' ? 'severity--sev2' : severity === 'SEV-3' ? 'severity--sev3' : 'severity--sev4';
 
+const screenTitles: Record<ScreenKey, { title: string; eyebrow: string }> = {
+  dashboard: { title: 'Operations overview', eyebrow: 'Command center' },
+  activeIncident: { title: 'Active incident', eyebrow: 'Live response / demo scenario' },
+  timeline: { title: 'Incident timeline', eyebrow: 'Response record' },
+  memory: { title: 'Organizational memory', eyebrow: 'Hindsight knowledge bank' },
+  diagnosis: { title: 'Diagnosis', eyebrow: 'Evidence assessment' },
+  blastRadius: { title: 'Blast radius', eyebrow: 'Service impact' },
+  timeMachine: { title: 'Incident time machine', eyebrow: 'What-if analysis' },
+  remediation: { title: 'Remediation approval', eyebrow: 'Human control' },
+  postmortem: { title: 'Postmortem', eyebrow: 'Incident review' },
+  learning: { title: 'Learning evolution', eyebrow: 'Memory lifecycle' },
+};
+
+const memoryCategoryViews: Array<{ key: OrganizationalMemoryCategory; title: string }> = [
+  { key: 'historical_incidents', title: 'Historical incidents' },
+  { key: 'root_causes', title: 'Root causes' },
+  { key: 'successful_fixes', title: 'Successful fixes' },
+  { key: 'failed_fixes', title: 'Failed fixes' },
+  { key: 'engineer_feedback', title: 'Engineer feedback' },
+  { key: 'postmortem_lessons', title: 'Postmortem lessons' },
+];
+
+const learningCurveStages = [
+  { incident: 'Incident 1', learning: 'Generic recommendation' },
+  { incident: 'Incident 5', learning: 'Recognizes recurring database pattern' },
+  { incident: 'Incident 10', learning: 'Avoids previously failed remediation' },
+  { incident: 'Incident 20', learning: 'Uses accumulated organizational experience' },
+];
+
+function LearningCurve() {
+  return (
+    <section className="panel learning-curve-panel">
+      <div className="section-header">
+        <div>
+          <h3>Learning curve</h3>
+          <p className="muted-text">Illustrative progression, not measured incident counts or performance metrics.</p>
+        </div>
+      </div>
+      <ol className="learning-curve">
+        {learningCurveStages.map((stage) => (
+          <li key={stage.incident}>
+            <span className="learning-curve__incident">{stage.incident}</span>
+            <span className="learning-curve__point">{stage.learning}</span>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
 export function App() {
   const [activeScenario, setActiveScenario] = useState<IncidentScenario>(MOCK_SCENARIOS[0]);
   const [screen, setScreen] = useState<ScreenKey>('dashboard');
   const [health, setHealth] = useState<HealthCheckResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [loadingHealth, setLoadingHealth] = useState<boolean>(true);
-  const [incidentMemory, setIncidentMemory] = useState<IncidentMemoryResult | null>(null);
+  const [organizationalMemory, setOrganizationalMemory] = useState<OrganizationalMemoryResult | null>(null);
   const [loadingMemory, setLoadingMemory] = useState<boolean>(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
+
+  const activeCount = MOCK_SCENARIOS.filter((entry) => entry.status !== 'RESOLVED' && entry.status !== 'POSTMORTEM_SAVED').length;
+  const affectedServiceCount = new Set(MOCK_SCENARIOS.flatMap((entry) => entry.blastRadius.nodes.filter((node) => node.affected).map((node) => node.name))).size;
+  const latestErrorRate = activeScenario.currentEvidence.metrics.errorRate.slice(-1)[0]?.label ?? 'Unavailable';
+  const latestLatency = activeScenario.currentEvidence.metrics.latencyMs.slice(-1)[0]?.label ?? 'Unavailable';
+  const latestCpu = activeScenario.currentEvidence.metrics.cpuUsage.slice(-1)[0]?.label ?? 'Unavailable';
 
   const loadHealth = useCallback(async () => {
     setLoadingHealth(true);
@@ -81,21 +146,34 @@ export function App() {
   }, [loadHealth]);
 
   useEffect(() => {
+    let cancelled = false;
     const loadMemory = async () => {
       setLoadingMemory(true);
       setMemoryError(null);
+      const query = [
+        activeScenario.title,
+        activeScenario.currentEvidence.telemetrySummary,
+        ...activeScenario.currentEvidence.liveLogs,
+      ].join(' ').slice(0, 500);
       try {
-        const data = await getIncidentMemory(activeScenario.id);
-        setIncidentMemory(data);
+        const data = await getOrganizationalMemory({
+          incidentId: activeScenario.id,
+          service: activeScenario.service,
+          query,
+        });
+        if (!cancelled) setOrganizationalMemory(data);
       } catch (err) {
-        setMemoryError(err instanceof Error ? err.message : 'Memory lookup failed.');
-        setIncidentMemory(null);
+        if (!cancelled) {
+          setMemoryError(err instanceof Error ? err.message : 'Memory lookup failed.');
+          setOrganizationalMemory(null);
+        }
       } finally {
-        setLoadingMemory(false);
+        if (!cancelled) setLoadingMemory(false);
       }
     };
 
     void loadMemory();
+    return () => { cancelled = true; };
   }, [activeScenario.id]);
 
   const timelineEntries = activeScenario.postmortem.timeline.length
@@ -103,40 +181,6 @@ export function App() {
     : [
         { time: 'Now', event: 'Incident under active triage' },
         { time: 'Pending', event: 'Awaiting diagnosis and Hindsight recall' },
-      ];
-
-  const relatedIncidents = incidentMemory?.similar_incidents?.length
-    ? incidentMemory.similar_incidents
-    : activeScenario.historicalEvidence.map((item) => ({
-        title: item.title,
-        similarity_score: item.similarityScore,
-        summary: item.pastRootCause,
-      }));
-
-  const successfulFixes = incidentMemory?.successful_fixes?.length
-    ? incidentMemory.successful_fixes
-    : activeScenario.historicalEvidence.flatMap((entry) =>
-        entry.attemptedFixes.filter((fix) => fix.outcome === 'SUCCESS').map((fix) => ({
-          action: fix.action,
-          outcome: fix.outcome,
-          consequence: fix.consequence,
-        })),
-      );
-
-  const failedFixes = incidentMemory?.failed_fixes?.length
-    ? incidentMemory.failed_fixes
-    : activeScenario.historicalEvidence.flatMap((entry) =>
-        entry.attemptedFixes.filter((fix) => fix.outcome === 'FAILURE').map((fix) => ({
-          action: fix.action,
-          consequence: fix.consequence,
-          engineer_notes: fix.engineerNotes,
-        })),
-      );
-
-  const engineerLessons = incidentMemory?.engineer_lessons?.length
-    ? incidentMemory.engineer_lessons
-    : [
-        { lesson: activeScenario.postmortem.engineerFeedback ?? 'Continue to validate memory-backed recommendations with engineering review.' },
       ];
 
   const renderSeverity = (severity: string) => (
@@ -173,8 +217,15 @@ export function App() {
           </label>
 
           <div className="header-badges">
-            <span className="header-badge">{health?.services?.api ?? 'api'} online</span>
-            <span className="header-badge header-badge--accent">Hindsight connected</span>
+            <span className={`header-badge ${health?.status === 'healthy' ? 'header-badge--good' : 'header-badge--warn'}`}>
+              <i className="status-indicator" />{loadingHealth ? 'Checking API' : health?.status === 'healthy' ? 'API healthy' : healthError ? 'API unavailable' : 'API degraded'}
+            </span>
+            <span className={`header-badge ${health?.services?.hindsight_configured ? 'header-badge--good' : 'header-badge--muted'}`}>
+              <i className="status-indicator" />Hindsight {health?.services?.hindsight_configured ? 'configured' : 'not configured'}
+            </span>
+            <button className="icon-button" type="button" onClick={loadHealth} aria-label="Refresh system health" title="Refresh system health" disabled={loadingHealth}>
+              <RefreshCw size={15} />
+            </button>
           </div>
         </div>
       </header>
@@ -187,6 +238,7 @@ export function App() {
               type="button"
               className={`nav-button ${screen === key ? 'nav-button--active' : ''}`}
               onClick={() => setScreen(key)}
+              aria-current={screen === key ? 'page' : undefined}
             >
               <Icon size={16} />
               <span>{label}</span>
@@ -195,19 +247,21 @@ export function App() {
         </aside>
 
         <main className="content-panel">
-          {loadingHealth && (
-            <div className="state-banner state-banner--info">Synchronizing system health telemetry...</div>
-          )}
-          {healthError && (
-            <div className="state-banner state-banner--error">{healthError}</div>
-          )}
+          <div className="page-heading">
+            <div>
+              <div className="eyebrow">{screenTitles[screen].eyebrow}</div>
+              <h2>{screenTitles[screen].title}</h2>
+            </div>
+            <span className="demo-label">SCENARIO DATA</span>
+          </div>
+          {loadingHealth && <div className="state-banner state-banner--info" role="status">Checking service health...</div>}
+          {healthError && <div className="state-banner state-banner--error" role="alert"><span>{healthError}</span><button type="button" className="text-button" onClick={loadHealth}>Retry</button></div>}
 
           {screen === 'dashboard' && (
             <div className="screen-stack">
-              <section className="summary-header panel">
+              <section className="summary-header">
                 <div>
-                  <div className="eyebrow">Operations overview</div>
-                  <h2>Service health and active incident posture</h2>
+                  <p>Service health and response posture across the current incident set.</p>
                 </div>
                 <button type="button" className="primary-button" onClick={() => setScreen('activeIncident')}>
                   Examine active incident
@@ -221,40 +275,40 @@ export function App() {
                     <span>Active incidents</span>
                     <Activity size={16} />
                   </div>
-                  <strong>4</strong>
-                  <p>2 Sev-1, 1 Sev-2, 1 Sev-3</p>
+                  <strong>{activeCount}</strong>
+                  <p>{MOCK_SCENARIOS.filter((entry) => entry.status !== 'RESOLVED' && entry.severity === 'SEV-1').length} critical · across scenario feed</p>
                 </article>
                 <article className="metric-card panel">
                   <div className="metric-card__header">
                     <span>Severity</span>
                     <TriangleAlert size={16} />
                   </div>
-                  <strong>SEV-1</strong>
-                  <p>Payment gateway saturation</p>
+                  <strong>{activeScenario.severity}</strong>
+                  <p>{activeScenario.service} · selected incident</p>
                 </article>
                 <article className="metric-card panel">
                   <div className="metric-card__header">
                     <span>Affected services</span>
                     <Network size={16} />
                   </div>
-                  <strong>12</strong>
-                  <p>4 services with customer impact</p>
+                  <strong>{affectedServiceCount}</strong>
+                  <p>Distinct affected services</p>
                 </article>
                 <article className="metric-card panel">
                   <div className="metric-card__header">
                     <span>Response time</span>
                     <Clock3 size={16} />
                   </div>
-                  <strong>4m 21s</strong>
-                  <p>Median MTTA in this environment</p>
+                  <strong>{activeScenario.postmortem.durationMinutes}m</strong>
+                  <p>Recorded incident duration · selected</p>
                 </article>
                 <article className="metric-card panel">
                   <div className="metric-card__header">
                     <span>System health</span>
                     <HeartPulse size={16} />
                   </div>
-                  <strong>{health?.status ?? 'healthy'}</strong>
-                  <p>{health?.environment ?? 'production'} environment</p>
+                  <strong>{loadingHealth ? 'Checking' : health?.status ?? 'Unknown'}</strong>
+                  <p>{health?.environment ?? 'Environment unavailable'}</p>
                 </article>
               </section>
 
@@ -264,7 +318,7 @@ export function App() {
                     <h3>Active incidents</h3>
                   </div>
                   <div className="incident-list">
-                    {MOCK_SCENARIOS.slice(0, 4).map((entry) => (
+                    {MOCK_SCENARIOS.filter((entry) => entry.status !== 'RESOLVED' && entry.status !== 'POSTMORTEM_SAVED').map((entry) => (
                       <button key={entry.id} type="button" className="incident-row" onClick={() => setActiveScenario(entry)}>
                         <div className="incident-row__meta">
                           <span className="incident-id">{entry.id}</span>
@@ -272,7 +326,7 @@ export function App() {
                         </div>
                         <div className="incident-row__main">
                           <strong>{entry.service}</strong>
-                          <span>{entry.status}</span>
+                          <span className="incident-state">{entry.status.replace(/_/g, ' ')}</span>
                         </div>
                         <div className="incident-row__metrics">
                           <span>{entry.summary}</span>
@@ -287,11 +341,16 @@ export function App() {
                     <h3>System health</h3>
                   </div>
                   <div className="health-stack">
-                    {['api', 'gateway', 'postgres', 'redis', 'hindsight'].map((service) => (
+                    {[
+                      { key: 'api', state: health?.services?.api ?? (loadingHealth ? 'checking' : 'unknown') },
+                      { key: 'database', state: health?.services?.database_url_configured ? 'configured' : 'not configured' },
+                      { key: 'model', state: health?.services?.model_configured ?? 'unknown' },
+                      { key: 'hindsight', state: health?.services?.hindsight_configured ? 'configured' : 'not configured' },
+                    ].map(({ key: service, state }) => (
                       <div key={service} className="health-row">
                         <span>{service}</span>
-                        <div className="health-bar"><i style={{ width: service === 'postgres' ? '78%' : service === 'hindsight' ? '92%' : '88%' }} /></div>
-                        <strong>{service === 'postgres' ? 'degraded' : 'healthy'}</strong>
+                        <div className="health-bar"><i className={state === 'healthy' || state === 'configured' || state === 'available' || state === 'true' ? 'health-bar__fill--good' : 'health-bar__fill--unknown'} /></div>
+                        <strong>{String(state).replace(/_/g, ' ')}</strong>
                       </div>
                     ))}
                   </div>
@@ -310,12 +369,12 @@ export function App() {
                     <span>Response</span>
                   </div>
                   {MOCK_SCENARIOS.map((entry) => (
-                    <div key={entry.id} className="recent-row">
+                    <button key={entry.id} type="button" className="recent-row" onClick={() => { setActiveScenario(entry); setScreen('activeIncident'); }}>
                       <span>{entry.id}</span>
                       <span>{entry.service}</span>
-                      <span>{entry.status}</span>
-                      <span>04m 20s</span>
-                    </div>
+                      <span>{entry.status.replace(/_/g, ' ')}</span>
+                      <span>{entry.postmortem.durationMinutes}m duration</span>
+                    </button>
                   ))}
                 </div>
               </section>
@@ -355,15 +414,15 @@ export function App() {
                   <div className="mini-metrics">
                     <div>
                       <span>Error rate</span>
-                      <strong>38.2%</strong>
+                      <strong>{latestErrorRate}</strong>
                     </div>
                     <div>
                       <span>P99 latency</span>
-                      <strong>4.2s</strong>
+                      <strong>{latestLatency}</strong>
                     </div>
                     <div>
-                      <span>Queue depth</span>
-                      <strong>342</strong>
+                      <span>Host CPU</span>
+                      <strong>{latestCpu}</strong>
                     </div>
                   </div>
                 </div>
@@ -403,11 +462,11 @@ export function App() {
                       </div>
                     </div>
                     <p>{activeScenario.aiInference.rootCauseHypothesis}</p>
-                    <ul>
-                      {activeScenario.aiInference.chainOfThought.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ul>
+                    <div className="evidence-list">
+                      {activeScenario.aiInference.chainOfThought.map((item) => {
+                        return <div className="evidence-row" key={item}>{sourcePill(evidenceSourceFor(item))}<p>{item}</p></div>;
+                      })}
+                    </div>
                   </div>
                 </div>
               </section>
@@ -420,114 +479,111 @@ export function App() {
                 <h3>Incident timeline</h3>
               </div>
               <div className="full-timeline">
-                {timelineEntries.map((entry, idx) => (
+                {timelineEntries.length ? timelineEntries.map((entry, idx) => (
                   <div key={`${entry.time}-${idx}`} className="timeline-row">
                     <span>{entry.time}</span>
                     <div className="timeline-separator" />
                     <p>{entry.event}</p>
                   </div>
-                ))}
+                )) : <div className="empty-state compact"><p>No timeline events recorded for this incident.</p></div>}
               </div>
             </div>
           )}
 
           {screen === 'memory' && (
             <div className="screen-stack">
-              {loadingMemory && <div className="state-banner state-banner--info">Loading Hindsight memory...</div>}
-              {memoryError && <div className="state-banner state-banner--error">{memoryError}</div>}
-
-              {!loadingMemory && !incidentMemory && !memoryError && (
-                <div className="empty-state panel">
-                  <CircleAlert size={20} />
-                  <p>No memory evidence is available for this incident yet.</p>
+              {memoryError && <div className="state-banner state-banner--error" role="alert">{memoryError}</div>}
+              <section className="memory-overview panel">
+                <div>
+                  <span className="memory-kicker">Organizational knowledge bank</span>
+                  <h3>Hindsight connects today’s incident to accumulated operational experience.</h3>
+                  <p>Records below are returned directly by Hindsight for this incident context. No local seed-data fallback is shown.</p>
                 </div>
-              )}
+                <div className="memory-bank-status">
+                  <span className={`status-badge ${organizationalMemory?.status === 'available' ? 'status-badge--success' : organizationalMemory?.status === 'unavailable' ? 'status-badge--fail' : 'status-badge--neutral'}`}>
+                    {loadingMemory ? 'Querying Hindsight' : organizationalMemory?.status ?? 'Unavailable'}
+                  </span>
+                  <span className="label">Bank</span>
+                  <strong>{organizationalMemory?.bank_id ?? 'Not connected'}</strong>
+                </div>
+              </section>
 
-              {!loadingMemory && incidentMemory && (
-                <>
-                  <section className="memory-grid">
-                    <div className="panel">
-                      <div className="section-header">
-                        <h3>Similar incidents</h3>
-                      </div>
-                      <div className="list-stack">
-                        {relatedIncidents.length ? relatedIncidents.map((item, idx) => {
-                          const record = item as Record<string, any>;
-                          const title = typeof record.title === 'string' ? record.title : 'Historical incident';
-                          const summary = typeof record.summary === 'string'
-                            ? record.summary
-                            : typeof record.pastRootCause === 'string'
-                              ? record.pastRootCause
-                              : 'Memory details unavailable.';
+              <section className="panel retrieval-panel">
+                <div className="section-header"><h3>Memory retrieval</h3><span>{sourcePill('Hindsight')}</span></div>
+                <ol className="retrieval-flow">
+                  <li>
+                    <span className="retrieval-flow__index">01</span>
+                    <div><strong>Current incident</strong><p>{activeScenario.id} · {activeScenario.service}</p></div>
+                    <span className="retrieval-flow__state">Context</span>
+                  </li>
+                  <li className="retrieval-flow__connector" aria-hidden="true"><ArrowDown size={14} /></li>
+                  <li>
+                    <span className="retrieval-flow__index">02</span>
+                    <div><strong>Hindsight query</strong><p>{organizationalMemory?.current_incident.query ?? [activeScenario.title, activeScenario.currentEvidence.telemetrySummary].join(' ')}</p></div>
+                    <span className="retrieval-flow__state">{loadingMemory ? 'Running' : organizationalMemory ? 'Submitted' : 'Waiting'}</span>
+                  </li>
+                  <li className="retrieval-flow__connector" aria-hidden="true"><ArrowDown size={14} /></li>
+                  <li>
+                    <span className="retrieval-flow__index">03</span>
+                    <div><strong>Retrieved memories</strong><p>{organizationalMemory?.retrieved_memories.length ?? (loadingMemory ? 'Retrieving records' : 'No records available')}</p></div>
+                    <span className="retrieval-flow__state">{organizationalMemory?.status ?? (loadingMemory ? 'Running' : 'Unavailable')}</span>
+                  </li>
+                  <li className="retrieval-flow__connector" aria-hidden="true"><ArrowDown size={14} /></li>
+                  <li>
+                    <span className="retrieval-flow__index">04</span>
+                    <div><strong>Evidence used by agent</strong><p>{organizationalMemory?.agent_evidence.length ?? (loadingMemory ? 'Preparing context' : 'No Hindsight evidence returned')}</p></div>
+                    <span className="retrieval-flow__state">{organizationalMemory?.agent_evidence.length ? 'Available' : loadingMemory ? 'Running' : 'Empty'}</span>
+                  </li>
+                </ol>
+              </section>
 
-                          return (
-                            <article key={`${title}-${idx}`} className="memory-item">
-                              <div className="memory-item__head">
-                                <strong>{title}</strong>
-                                <span>{Math.round((record.similarity_score ?? record.similarityScore ?? 0.82) * 100)}% match</span>
-                              </div>
-                              <p>{summary}</p>
-                            </article>
-                          );
-                        }) : <div className="empty-state compact"><p>No similar incidents identified.</p></div>}
-                      </div>
-                    </div>
+              <section className="memory-grid organizational-memory-grid">
+                {memoryCategoryViews.map(({ key, title }) => {
+                  const records = organizationalMemory?.categories[key] ?? [];
+                  return (
+                    <section className="panel memory-category" key={key}>
+                      <div className="section-header"><h3>{title}</h3><span className="memory-count">{records.length}</span></div>
+                      {records.length ? records.map((record, index) => (
+                        <article className="memory-record" key={`${record.id ?? key}-${index}`}>
+                          <div className="memory-record__meta">
+                            <span>{record.id ?? 'Source ID unavailable'}</span>
+                            <span>{record.type}</span>
+                          </div>
+                          <p>{record.text || 'Hindsight returned a record without text content.'}</p>
+                          {record.tags.length > 0 && <div className="memory-tags">{record.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
+                          <details>
+                            <summary>Record provenance</summary>
+                            <dl>
+                              <div><dt>Source</dt><dd>{record.source ?? 'Hindsight'}</dd></div>
+                              {typeof record.metadata.incident_id === 'string' && <div><dt>Incident</dt><dd>{record.metadata.incident_id}</dd></div>}
+                              {typeof record.metadata.service === 'string' && <div><dt>Service</dt><dd>{record.metadata.service}</dd></div>}
+                              {record.score !== null && record.score !== undefined && <div><dt>Recall score</dt><dd>{record.score}</dd></div>}
+                              <div><dt>Metadata</dt><dd><code>{JSON.stringify(record.metadata)}</code></dd></div>
+                            </dl>
+                          </details>
+                        </article>
+                      )) : (
+                        <div className="empty-state compact">
+                          <p>{loadingMemory ? 'Querying Hindsight...' : organizationalMemory?.status === 'unavailable' ? 'Hindsight is unavailable. No substitute records are shown.' : 'No matching Hindsight records returned for this query.'}</p>
+                        </div>
+                      )}
+                    </section>
+                  );
+                })}
+              </section>
 
-                    <div className="panel">
-                      <div className="section-header">
-                        <h3>Successful fixes</h3>
-                      </div>
-                      <div className="list-stack">
-                        {successfulFixes.length ? successfulFixes.map((item, idx) => (
-                          <article key={`${item.action}-${idx}`} className="memory-item memory-item--success">
-                            <div className="memory-item__head">
-                              <strong>{item.action}</strong>
-                              <span className="status-badge status-badge--success">Success</span>
-                            </div>
-                            <p>{item.consequence ?? 'Resolved prior incident without unnecessary blast radius.'}</p>
-                          </article>
-                        )) : <div className="empty-state compact"><p>No successful fix record.</p></div>}
-                      </div>
-                    </div>
-                  </section>
+              <section className="panel agent-evidence-panel">
+                <div className="section-header"><div><h3>Evidence surfaced to agents</h3><p className="muted-text">The retrieved records available as Hindsight context, preserving their source identifiers.</p></div></div>
+                {organizationalMemory?.agent_evidence.length ? organizationalMemory.agent_evidence.map((record, index) => (
+                  <article className="agent-evidence-row" key={`${record.id ?? record.category}-${index}`}>
+                    <span className="evidence-pill evidence-pill--hindsight">Hindsight</span>
+                    <div><strong>{record.id ?? 'Record ID unavailable'} · {record.category?.replace(/_/g, ' ')}</strong><p>{record.text}</p></div>
+                    <span className="agent-evidence-tags">{record.tags.join(', ')}</span>
+                  </article>
+                )) : <div className="empty-state compact"><p>{loadingMemory ? 'Waiting for retrieved records...' : 'No retrieved Hindsight evidence was returned to the agent context.'}</p></div>}
+              </section>
 
-                  <section className="memory-grid">
-                    <div className="panel">
-                      <div className="section-header">
-                        <h3>Failed fixes</h3>
-                      </div>
-                      <div className="list-stack">
-                        {failedFixes.length ? failedFixes.map((item, idx) => (
-                          <article key={`${item.action}-${idx}`} className="memory-item memory-item--fail">
-                            <div className="memory-item__head">
-                              <strong>{item.action}</strong>
-                              <span className="status-badge status-badge--fail">Failed</span>
-                            </div>
-                            <p>{item.consequence ?? item.engineer_notes ?? 'Failure details unavailable.'}</p>
-                          </article>
-                        )) : <div className="empty-state compact"><p>No failed action memory.</p></div>}
-                      </div>
-                    </div>
-
-                    <div className="panel">
-                      <div className="section-header">
-                        <h3>Engineer lessons</h3>
-                      </div>
-                      <div className="list-stack">
-                        {engineerLessons.length ? engineerLessons.map((item, idx) => (
-                          <article key={`${item.lesson}-${idx}`} className="memory-item">
-                            <div className="memory-item__head">
-                              <strong>Lesson {idx + 1}</strong>
-                              <span className="status-badge status-badge--neutral">Operational</span>
-                            </div>
-                            <p>{item.lesson ?? item.comment ?? 'No lesson captured.'}</p>
-                          </article>
-                        )) : <div className="empty-state compact"><p>No engineer lessons recorded.</p></div>}
-                      </div>
-                    </div>
-                  </section>
-                </>
-              )}
+              <LearningCurve />
             </div>
           )}
 
@@ -553,11 +609,11 @@ export function App() {
                   <p className="diagnosis-body">{activeScenario.aiInference.rootCauseHypothesis}</p>
                 </div>
 
-                <ul className="chain-list">
-                  {activeScenario.aiInference.chainOfThought.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
+                <div className="evidence-list diagnosis-evidence">
+                  {activeScenario.aiInference.chainOfThought.map((item) => {
+                    return <article className="evidence-row" key={item}>{sourcePill(evidenceSourceFor(item))}<p>{item}</p></article>;
+                  })}
+                </div>
               </div>
             </div>
           )}
@@ -683,10 +739,15 @@ export function App() {
                     <strong>{activeScenario.postmortem.durationMinutes} minutes</strong>
                   </div>
                 </div>
+                <div className="postmortem-sections">
+                  <div><span className="label">Incident summary</span><p>{activeScenario.summary}</p></div>
+                  <div><span className="label">Impact</span><p>{activeScenario.blastRadius.estimatedUserImpactPct}% estimated user impact across {activeScenario.blastRadius.affectedServicesCount} services.</p></div>
+                  <div><span className="label">Timeline</span><p>{activeScenario.postmortem.timeline.length} events recorded.</p></div>
+                  <div><span className="label">Actions attempted</span><p>{activeScenario.candidates.map((candidate) => candidate.actionName).join('; ') || 'No actions recorded.'}</p></div>
+                  <div><span className="label">Future prevention</span><ul className="simple-list">{activeScenario.postmortem.correctiveActions.map((action) => <li key={action}>{action}</li>)}</ul></div>
+                </div>
                 <ul className="simple-list">
-                  {activeScenario.postmortem.correctiveActions.map((action) => (
-                    <li key={action}>{action}</li>
-                  ))}
+                  <li>Engineer rating: {activeScenario.postmortem.engineerRating ?? 'Not provided'}</li>
                 </ul>
               </div>
 
@@ -707,39 +768,35 @@ export function App() {
                 </div>
                 <div className="learning-grid">
                   <div>
-                    <span className="label">Current memory confidence</span>
-                    <strong>{incidentMemory?.memory_confidence ? `${Math.round(incidentMemory.memory_confidence * 100)}%` : '84%'}</strong>
+                    <span className="label">Hindsight retrieval</span>
+                    <strong>{loadingMemory ? 'Loading' : organizationalMemory?.status ?? 'Unavailable'}</strong>
                   </div>
                   <div>
-                    <span className="label">Retained to Hindsight</span>
-                    <strong>{activeScenario.postmortem.retainedToHindsight ? 'Yes' : 'Queued'}</strong>
+                    <span className="label">Records returned</span>
+                    <strong>{organizationalMemory?.retrieved_memories.length ?? (loadingMemory ? 'Loading' : 'Unavailable')}</strong>
                   </div>
                   <div>
-                    <span className="label">Memory ID</span>
-                    <strong>{activeScenario.postmortem.hindsightMemoryId ?? 'MEM-ORG-8821'}</strong>
+                    <span className="label">Memory bank</span>
+                    <strong>{organizationalMemory?.bank_id ?? 'Unavailable'}</strong>
                   </div>
                 </div>
               </div>
 
               <div className="panel">
                 <div className="section-header">
-                  <h3>Evidence lineage</h3>
+                  <h3>Retrieved memory records</h3>
                 </div>
                 <div className="lineage-list">
-                  <div className="lineage-item">
-                    <span>Current telemetry</span>
-                    <small>Connection pool reached 100/100 and produced 38% checkout errors.</small>
-                  </div>
-                  <div className="lineage-item">
-                    <span>Hindsight</span>
-                    <small>INC-419 historical evidence warned against database restart and validated the pool resize.</small>
-                  </div>
-                  <div className="lineage-item">
-                    <span>RAG</span>
-                    <small>Runbook section 4.2 identifies idle transaction drain and pool scaling as the approved path.</small>
-                  </div>
+                  {organizationalMemory?.retrieved_memories.length ? organizationalMemory.retrieved_memories.map((record, index) => (
+                    <div className="lineage-item" key={`${record.id ?? 'memory'}-${index}`}>
+                      <span>{record.id ?? 'Hindsight record'} · {record.category?.replace(/_/g, ' ')}</span>
+                      <small>{record.text}</small>
+                      <small>Tags: {record.tags.length ? record.tags.join(', ') : 'No tags returned'}</small>
+                    </div>
+                  )) : <div className="empty-state compact"><p>{loadingMemory ? 'Loading Hindsight records...' : 'No Hindsight memory records are available for this incident context.'}</p></div>}
                 </div>
               </div>
+              <LearningCurve />
             </div>
           )}
         </main>

@@ -57,6 +57,36 @@ export interface IncidentMemoryResult {
   }>;
 }
 
+export interface HindsightMemoryRecord {
+  id?: string | null;
+  text: string;
+  type: string;
+  tags: string[];
+  metadata: Record<string, unknown>;
+  context?: string | null;
+  score?: number | null;
+  category?: string;
+  source?: string;
+}
+
+export type OrganizationalMemoryCategory =
+  | 'historical_incidents'
+  | 'root_causes'
+  | 'successful_fixes'
+  | 'failed_fixes'
+  | 'engineer_feedback'
+  | 'postmortem_lessons';
+
+export interface OrganizationalMemoryResult {
+  current_incident: { incident_id: string; service: string; query: string };
+  status: 'available' | 'empty' | 'unavailable';
+  bank_id: string;
+  health: { healthy: boolean; status: string; message?: string; [key: string]: unknown };
+  categories: Record<OrganizationalMemoryCategory, HindsightMemoryRecord[]>;
+  retrieved_memories: HindsightMemoryRecord[];
+  agent_evidence: HindsightMemoryRecord[];
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1';
 
 export async function fetchHealth(): Promise<HealthCheckResponse> {
@@ -128,6 +158,27 @@ export async function getIncidentMemory(idOrIncidentId: string): Promise<Inciden
 
   if (!response.ok) {
     throw new Error(`Failed to fetch Hindsight memory for incident ${idOrIncidentId}: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+export async function getOrganizationalMemory(params: {
+  incidentId: string;
+  service: string;
+  query: string;
+}): Promise<OrganizationalMemoryResult> {
+  const query = new URLSearchParams({
+    incident_id: params.incidentId,
+    service: params.service,
+    query: params.query,
+  });
+  const response = await fetch(`${API_BASE_URL}/incidents/organizational-memory?${query.toString()}`, {
+    headers: { 'Accept': 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to retrieve organizational memory: ${response.statusText}`);
   }
 
   return response.json();

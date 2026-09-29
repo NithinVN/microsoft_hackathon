@@ -147,3 +147,9 @@ Frontend available at: `http://localhost:5173`
 ```bash
 docker compose up --build
 ```
+
+### 6. Prometheus and Alertmanager (Optional)
+See [docs/prometheus-alertmanager.md](docs/prometheus-alertmanager.md) for the optional monitoring profile, demo rules, webhook configuration, and sample payload testing.
+
+### 7. Azure Monitor Webhook Integration (Optional)
+See [docs/azure-monitor.md](docs/azure-monitor.md) for the Azure Monitor webhook adapter (`POST /api/v1/webhooks/azure-monitor`), Common Alert Schema normalization, Action Group setup, and authentication options.

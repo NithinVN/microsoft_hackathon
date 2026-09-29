@@ -1,0 +1,40 @@
+{
+  "schemaId": "azureMonitorCommonAlertSchema",
+  "data": {
+    "essentials": {
+      "alertId": "/subscriptions/22222222-3333-4444-5555-666666666666/providers/Microsoft.AlertsManagement/alerts/f871a3de-1994-4ab6-857c-179379e4d94b",
+      "alertRule": "PaymentGateway5xxErrorSpike",
+      "severity": "Sev0",
+      "signalType": "Log",
+      "monitorCondition": "Fired",
+      "monitoringService": "Log Analytics",
+      "alertTargetIDs": [
+        "/subscriptions/22222222-3333-4444-5555-666666666666/resourcegroups/rg-prod/providers/microsoft.operationalinsights/workspaces/law-prod"
+      ],
+      "originAlertId": "f871a3de-1994-4ab6-857c-179379e4d94b",
+      "firedDateTime": "2026-09-29T11:00:00.0000000Z",
+      "description": "5xx error count exceeded 50 requests in 5 minutes on payment-api",
+      "essentialsVersion": "1.0",
+      "alertContextVersion": "1.0"
+    },
+    "alertContext": {
+      "properties": null,
+      "conditionType": "LogQueryCriteria",
+      "condition": {
+        "windowSize": "PT5M",
+        "allOf": [
+          {
+            "searchQuery": "AppRequests | where ResultCode startswith '5' | summarize count() by bin(TimeGenerated, 5m)",
+            "operator": "GreaterThan",
+            "threshold": "50",
+            "metricValue": 142
+          }
+        ]
+      }
+    },
+    "customProperties": {
+      "service": "payment-api",
+      "tier": "1"
+    }
+  }
+}

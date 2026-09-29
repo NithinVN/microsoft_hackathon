@@ -256,6 +256,41 @@ def test_recall_successful_remediations(hindsight_svc, mock_hindsight_client):
     assert len(results) == 1
 
 
+def test_recall_organizational_memories_returns_source_records(hindsight_svc):
+    result = hindsight_svc.recall_organizational_memories(
+        query="connection pool saturation",
+        service="payment-api",
+        limit=3,
+    )
+
+    assert result["status"] == "available"
+    assert result["bank_id"] == "test-bank"
+    assert result["retrieved_memories"][0]["id"] == "mem-1"
+    assert result["retrieved_memories"][0]["source"] == "Hindsight"
+    assert result["agent_evidence"]
+    assert set(result["categories"]) == {
+        "historical_incidents",
+        "root_causes",
+        "successful_fixes",
+        "failed_fixes",
+        "engineer_feedback",
+        "postmortem_lessons",
+    }
+
+
+def test_recall_organizational_memories_does_not_fallback_when_unavailable(hindsight_svc, monkeypatch):
+    monkeypatch.setattr(hindsight_svc, "check_health", lambda: {"healthy": False, "status": "unreachable"})
+
+    result = hindsight_svc.recall_organizational_memories(
+        query="connection pool saturation",
+        service="payment-api",
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["retrieved_memories"] == []
+    assert all(not records for records in result["categories"].values())
+
+
 def test_reflect_on_incident_history(hindsight_svc, mock_hindsight_client):
     """Verifies synthesized cognitive reflection across incident history."""
     reflection = hindsight_svc.reflect_on_incident_history(

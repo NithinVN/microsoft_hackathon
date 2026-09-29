@@ -58,3 +58,8 @@ Thumbs.db
 # Project logs & scratch
 *.log
 scratch/
+
+*.db
+*.sqlite
+*.sqlite3
+.env

@@ -1,37 +1,18 @@
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.models.incident import Alert, Deployment, Service
+from backend.app.models.incident import Deployment, Service
 from backend.app.repositories.incident_repository import IncidentRepository
-from backend.app.schemas.incident import IncidentCreate, IncidentEventCreate, IncidentRead, InvestigationCreate
+from backend.app.schemas.incident import IncidentCreate, IncidentRead
 from backend.app.schemas.simulator import SimulateIncidentRequest, SimulateIncidentResponse
 from backend.app.simulator.scenarios import get_scenario
+from backend.app.services.incident_intake import IncidentIntakeService, normalize_severity
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def normalize_severity(severity_input: Optional[str], default_sev: str) -> str:
-    """Normalizes input strings like 'critical', 'major', 'sev-1' to 'SEV-1'..'SEV-4'."""
-    if not severity_input:
-        return default_sev
-
-    sev_upper = severity_input.strip().upper()
-    if sev_upper in ["SEV-1", "SEV-2", "SEV-3", "SEV-4"]:
-        return sev_upper
-    if sev_upper in ["CRITICAL", "SEV1", "P1"]:
-        return "SEV-1"
-    if sev_upper in ["MAJOR", "SEV2", "P2", "HIGH"]:
-        return "SEV-2"
-    if sev_upper in ["MODERATE", "SEV3", "P3", "MEDIUM"]:
-        return "SEV-3"
-    if sev_upper in ["MINOR", "SEV4", "P4", "LOW"]:
-        return "SEV-4"
-    return default_sev
 
 
 class IncidentSimulatorEngine:
@@ -103,22 +84,9 @@ class IncidentSimulatorEngine:
         service = await self._ensure_service(scenario_data["service_info"])
         await self._ensure_deployment(service.id, scenario_data["deployment_info"])
 
-        # 3. Create Operational Alert record
+        # 3. Normalize simulator input into the shared alert and incident intake path.
         raw_alert = scenario_data["alert"]
-        alert = Alert(
-            alert_id=f"{raw_alert['alert_id']}-{unique_suffix}",
-            name=raw_alert["name"],
-            source=raw_alert.get("source", "simulator"),
-            severity=raw_alert.get("severity", "critical"),
-            status="firing",
-            payload=raw_alert.get("payload", {}),
-            triggered_at=utcnow(),
-        )
-        self.session.add(alert)
-        await self.session.commit()
-        await self.session.refresh(alert)
-
-        # 4. Create Incident in PostgreSQL via Incident Repository (Same pipeline as real alerts)
+        alert_identifier = f"{raw_alert['alert_id']}-{unique_suffix}"
         incident_create = IncidentCreate(
             incident_id=incident_id,
             title=f"[{scenario_data['primary_service']}] {scenario_data['name']}",
@@ -131,41 +99,27 @@ class IncidentSimulatorEngine:
             metadata={
                 "scenario_id": request.scenario,
                 "environment": request.environment,
-                "alert_id": alert.alert_id,
+                "alert_id": alert_identifier,
                 "affected_services": scenario_data["affected_services"],
                 "root_cause_type": scenario_data["root_cause_type"],
             },
         )
-        incident = await self.repo.create_incident(incident_create)
-
-        # Link alert to incident
-        alert.incident_id = incident.id
-        await self.session.commit()
-
-        # 5. Populate initial Investigation telemetry evidence
-        await self.repo.store_investigation(
-            incident_id=incident.id,
-            data=InvestigationCreate(
-                agent_name="InvestigationAgent",
-                findings=f"Telemetry anomaly detected: {scenario_data['description']}",
-                telemetry_summary=scenario_data.get("metrics", {}),
-                correlated_traces=scenario_data.get("traces", []),
-            ),
+        alert, full_incident = await IncidentIntakeService(self.session).create_from_alert(
+            incident_data=incident_create,
+            alert_data={
+                "alert_id": alert_identifier,
+                "name": raw_alert["name"],
+                "source": raw_alert.get("source", "simulator"),
+                "severity": raw_alert.get("severity", "critical"),
+                "status": "firing",
+                "payload": raw_alert.get("payload", {}),
+                "triggered_at": utcnow(),
+            },
+            findings=f"Telemetry anomaly detected: {scenario_data['description']}",
+            telemetry_summary=scenario_data.get("metrics", {}),
+            correlated_traces=scenario_data.get("traces", []),
+            pipeline_payload={"scenario": request.scenario, "severity": severity},
         )
-
-        # 6. Append chronological pipeline event
-        await self.repo.add_event(
-            incident_id=incident.id,
-            data=IncidentEventCreate(
-                event_type="PIPELINE_INITIALIZED",
-                actor="IncidentOrchestrator",
-                message="Incident entered the active response pipeline. Dispatched Investigation and Blast Radius agents.",
-                payload={"scenario": request.scenario, "severity": severity},
-            ),
-        )
-
-        # 7. Fetch refreshed full incident
-        full_incident = await self.repo.get_incident_by_id(incident.id)
 
         return SimulateIncidentResponse(
             success=True,

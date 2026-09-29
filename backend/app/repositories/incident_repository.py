@@ -122,15 +122,17 @@ class IncidentRepository:
         successful_actions = []
         failed_actions = []
         failed_reasons = []
+        attempted_actions = []
 
+        remediation_map = {remediation.id: remediation for remediation in incident.remediations or []}
         for execution in incident.executions or []:
             action_title = "remediation action"
-            for remediation in incident.remediations or []:
-                if remediation.id == execution.remediation_action_id:
-                    action_title = remediation.title
-                    break
+            remediation = remediation_map.get(execution.remediation_action_id)
+            if remediation:
+                action_title = remediation.title
+                attempted_actions.append(remediation.title)
 
-            if execution.status in {"VERIFIED_RECOVERED", "APPROVED", "SUCCESS", "RECOVERED"}:
+            if execution.status in {"VERIFIED_RECOVERED", "APPROVED", "SUCCESS", "RECOVERED", "RESOLVED"}:
                 successful_actions.append(action_title)
             else:
                 failed_actions.append(action_title)
@@ -146,6 +148,9 @@ class IncidentRepository:
 
         timeline = [{"time": event.timestamp.strftime("%H:%M"), "event": event.message} for event in incident.events or []]
         memory_id = f"HINDSIGHT-{incident.incident_id.upper()}"
+        detection_message = incident.description or incident.title
+        impact_summary = f"Customers and dependent services were affected while {incident.affected_service} was degraded."
+        final_resolution = "; ".join(successful_actions) if successful_actions else "Incident recovered through validated monitoring and stabilization."
 
         return PostmortemCreate(
             title=f"{incident.title} Postmortem",
@@ -153,11 +158,19 @@ class IncidentRepository:
             root_cause=diagnosis,
             trigger_event=incident.description or incident.title,
             what_happened=incident.description or f"Incident {incident.incident_id} affected {incident.affected_service}.",
+            incident_summary=incident.description or f"Incident {incident.incident_id} affected {incident.affected_service} during {incident.status.lower()}.",
+            impact=impact_summary,
+            detection=detection_message,
             what_worked=successful_actions,
             what_failed=failed_actions,
             why_it_failed="; ".join(failed_reasons) if failed_reasons else "No failed remediation actions were observed in the final workflow.",
+            contributing_factors="; ".join(filter(None, [incident.description, *feedback_comments])) or "Operational pressure and missing guardrails contributed to the event.",
+            actual_outcome=final_resolution,
+            final_resolution=final_resolution,
             engineer_corrections=feedback_comments,
+            engineer_feedback="; ".join(feedback_comments) if feedback_comments else "No engineer feedback recorded.",
             lessons_learned=lessons,
+            future_prevention="Prevent recurrence by retaining the proven fix, hardening guardrails, and escalating alerts before customer impact grows.",
             corrective_actions=successful_actions or ["Continue monitoring and verify the root cause remediation."],
             timeline=timeline,
             hindsight_retained=True,
@@ -361,12 +374,20 @@ class IncidentRepository:
             duration_minutes=data.duration_minutes,
             root_cause=data.root_cause,
             trigger_event=data.trigger_event,
+            incident_summary=data.incident_summary,
+            impact=data.impact,
+            detection=data.detection,
             what_happened=data.what_happened,
             what_worked=data.what_worked,
             what_failed=data.what_failed,
             why_it_failed=data.why_it_failed,
+            contributing_factors=data.contributing_factors,
+            actual_outcome=data.actual_outcome,
+            final_resolution=data.final_resolution,
             engineer_corrections=data.engineer_corrections,
+            engineer_feedback=data.engineer_feedback,
             lessons_learned=data.lessons_learned,
+            future_prevention=data.future_prevention,
             corrective_actions=data.corrective_actions,
             timeline=data.timeline,
             hindsight_retained=data.hindsight_retained,
@@ -385,21 +406,77 @@ class IncidentRepository:
         if data.hindsight_retained:
             from backend.app.memory.hindsight_service import hindsight_service
 
-            hindsight_service.retain_incident({
+            incident_payload = {
                 "incident_id": incident.incident_id,
                 "title": incident.title,
                 "affected_service": incident.affected_service,
                 "severity": incident.severity,
                 "status": "resolved",
-                "description": incident.description,
+                "description": incident.description or data.what_happened,
                 "symptoms": incident.symptoms,
                 "root_cause": data.root_cause,
                 "resolution": "; ".join(data.corrective_actions or data.what_worked or ["Incident resolved"]),
-            })
+                "detected_at": incident.detected_at.isoformat(),
+            }
+            hindsight_service.retain_incident(incident_payload)
+            hindsight_service.retain_root_cause(
+                incident_id=incident.incident_id,
+                service=incident.affected_service,
+                root_cause=data.root_cause,
+                evidence={
+                    "what_happened": data.what_happened,
+                    "why_it_failed": data.why_it_failed,
+                    "timeline": data.timeline,
+                },
+            )
+
+            remediation_map = {remediation.id: remediation for remediation in incident.remediations or []}
+            for execution in incident.executions or []:
+                remediation = remediation_map.get(execution.remediation_action_id)
+                if not remediation:
+                    continue
+
+                params = {
+                    "action_key": remediation.action_key,
+                    "title": remediation.title,
+                    "description": remediation.description,
+                    "safety_level": remediation.safety_level,
+                    "historical_precedent": remediation.historical_precedent,
+                }
+                normalized_status = str(execution.status or "").upper()
+                if normalized_status in {"VERIFIED_RECOVERED", "APPROVED", "SUCCESS", "RECOVERED", "RESOLVED"}:
+                    hindsight_service.retain_successful_fix(
+                        incident_id=incident.incident_id,
+                        service=incident.affected_service,
+                        action_type=remediation.action_key,
+                        parameters=params,
+                        rationale=execution.approval_notes or remediation.description,
+                        outcome_notes=execution.execution_output or data.actual_outcome or "Recovery verified.",
+                    )
+                else:
+                    hindsight_service.retain_failed_fix(
+                        incident_id=incident.incident_id,
+                        service=incident.affected_service,
+                        action_type=remediation.action_key,
+                        parameters=params,
+                        failure_reason=execution.approval_notes or execution.execution_output or "Failed remediation action was attempted during the incident.",
+                        unintended_consequences=execution.execution_output or "Action failed and was not retained as the final fix.",
+                    )
+
+            for feedback in incident.feedbacks or []:
+                hindsight_service.retain_engineer_feedback(
+                    incident_id=incident.incident_id,
+                    service=incident.affected_service,
+                    engineer_id=feedback.engineer_id,
+                    rating=f"{feedback.rating}_stars",
+                    feedback_text=feedback.comments,
+                    tags=["postmortem", "engineer_correction"],
+                )
+
             hindsight_service.retain_postmortem(
                 incident_id=incident.incident_id,
                 service=incident.affected_service,
-                executive_summary=data.what_happened or data.root_cause,
+                executive_summary=data.what_happened or incident.description or data.incident_summary,
                 root_cause_analysis=data.root_cause,
                 lessons_learned=data.lessons_learned or ["Incident was resolved with evidence-based remediation."],
                 preventive_actions=data.corrective_actions or ["Monitor and harden the service against the root cause."],

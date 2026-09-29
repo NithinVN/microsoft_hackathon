@@ -423,3 +423,121 @@ async def test_resolved_incident_generates_learning_loop_postmortem(db_session: 
     assert resolved.postmortem.lessons_learned
     assert resolved.postmortem.hindsight_retained is True
     assert resolved.postmortem.hindsight_memory_id is not None
+
+
+@pytest.mark.asyncio
+async def test_resolved_incident_creates_new_hindsight_memories(db_session: AsyncSession, monkeypatch):
+    """A resolved incident should retain incident, action, feedback, and postmortem memories in Hindsight."""
+    repo = IncidentRepository(db_session)
+
+    incident = await repo.create_incident(
+        IncidentCreate(
+            incident_id="INC-710",
+            title="Database Pool Burnout",
+            description="Database pool exhaustion caused login slowness during launch.",
+            severity="SEV-2",
+            status="INVESTIGATING",
+            affected_service="auth-service",
+            symptoms=["Login latency increased", "pool saturated"],
+        )
+    )
+
+    await repo.store_diagnosis(
+        incident.id,
+        DiagnosisCreate(
+            agent_name="DiagnosisAgent",
+            root_cause_hypothesis="Connection pool leak from retry storms exhausted database capacity.",
+            confidence_score=0.9,
+            chain_of_thought=["Retry storms observed", "pool saturation matches symptoms"],
+            risk_assessment="Moderate impact",
+        ),
+    )
+
+    successful_action = await repo.store_remediation(
+        incident.id,
+        RemediationActionCreate(
+            action_key="pool_resize",
+            title="Resize connection pool",
+            description="Increase pool headroom and drain frozen connections.",
+            command_template="resize-pool --max 250",
+            safety_level="SAFE",
+            historical_precedent="SUCCESS_BEFORE",
+            is_recommended=True,
+        ),
+    )
+    await repo.store_execution_result(
+        incident.id,
+        ActionExecutionCreate(
+            remediation_action_id=successful_action.id,
+            status="VERIFIED_RECOVERED",
+            approved_by="eng_noah",
+            approval_notes="Pool resize fixed retry storm saturation.",
+            execution_output="Login latency returned to baseline.",
+            verification_status="VERIFIED_RECOVERED",
+        ),
+    )
+
+    failed_action = await repo.store_remediation(
+        incident.id,
+        RemediationActionCreate(
+            action_key="force_restart",
+            title="Force reboot database",
+            description="Restart database immediately under load.",
+            command_template="db-restart --force",
+            safety_level="DANGEROUS",
+            historical_precedent="FAILED_BEFORE",
+            is_recommended=False,
+        ),
+    )
+    await repo.store_execution_result(
+        incident.id,
+        ActionExecutionCreate(
+            remediation_action_id=failed_action.id,
+            status="FAILED",
+            approved_by="eng_noah",
+            approval_notes="Rejected because it worsens connection thundering herd.",
+            execution_output="Restart was aborted before execution.",
+            verification_status="NOT_APPLICABLE",
+        ),
+    )
+
+    await repo.store_feedback(
+        incident.id,
+        EngineerFeedbackCreate(
+            engineer_id="eng_noah",
+            rating=4,
+            comments="The pool resize worked; force restarts are dangerous under load.",
+            accuracy_evaluation="mostly_accurate",
+        ),
+    )
+
+    retained_events = []
+
+    def record_event(name):
+        def _record(*args, **kwargs):
+            retained_events.append(name)
+            return {"success": True, "bank_id": "incidentmind-org"}
+        return _record
+
+    import importlib
+    hindsight_module = importlib.import_module("backend.app.memory.hindsight_service")
+    monkeypatch.setattr(hindsight_module.hindsight_service, "retain_incident", record_event("incident"))
+    monkeypatch.setattr(hindsight_module.hindsight_service, "retain_root_cause", record_event("root_cause"))
+    monkeypatch.setattr(hindsight_module.hindsight_service, "retain_successful_fix", record_event("successful_fix"))
+    monkeypatch.setattr(hindsight_module.hindsight_service, "retain_failed_fix", record_event("failed_fix"))
+    monkeypatch.setattr(hindsight_module.hindsight_service, "retain_engineer_feedback", record_event("engineer_feedback"))
+    monkeypatch.setattr(hindsight_module.hindsight_service, "retain_postmortem", record_event("postmortem"))
+
+    resolved = await repo.update_incident(
+        incident.id,
+        IncidentUpdate(status="RESOLVED", resolved_at=utcnow(), description="Recovered after resizing the pool."),
+    )
+
+    assert resolved is not None
+    assert resolved.postmortem is not None
+    assert resolved.postmortem.hindsight_retained is True
+    assert "incident" in retained_events
+    assert "successful_fix" in retained_events
+    assert "failed_fix" in retained_events
+    assert "engineer_feedback" in retained_events
+    assert "postmortem" in retained_events

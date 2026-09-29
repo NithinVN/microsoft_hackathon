@@ -423,6 +423,21 @@ class RecordEngineerFeedbackOutput(BaseModel):
     error: Optional[Dict[str, Any]] = None
 
 
+_RUNTIME_INCIDENTS: Dict[str, Dict[str, Any]] = {}
+
+
+def register_runtime_incident(incident: Dict[str, Any]) -> None:
+    """Register an incident created at runtime (e.g. from webhooks or simulator) for agent tools."""
+    incident_id = incident.get("incident_id")
+    if incident_id:
+        _RUNTIME_INCIDENTS[incident_id] = incident
+
+
+def clear_runtime_incidents() -> None:
+    """Clear registered runtime incidents (used primarily for test isolation)."""
+    _RUNTIME_INCIDENTS.clear()
+
+
 def _read_incidents() -> List[Dict[str, Any]]:
     if not DATASET_PATH.exists():
         raise IncidentToolError(f"Historical incident dataset not found at {DATASET_PATH}")
@@ -435,6 +450,8 @@ def _read_incidents() -> List[Dict[str, Any]]:
 
 def _find_incident_by_id(incident_id: str) -> Optional[Dict[str, Any]]:
     incident_id = incident_id.strip()
+    if incident_id in _RUNTIME_INCIDENTS:
+        return _RUNTIME_INCIDENTS[incident_id]
     for incident in _read_incidents():
         if incident.get("incident_id") == incident_id:
             return incident
@@ -442,7 +459,8 @@ def _find_incident_by_id(incident_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _find_incidents_for_service(service: str) -> List[Dict[str, Any]]:
-    return [incident for incident in _read_incidents() if incident.get("service") == service]
+    runtime_matches = [inc for inc in _RUNTIME_INCIDENTS.values() if inc.get("service") == service]
+    return runtime_matches + [incident for incident in _read_incidents() if incident.get("service") == service]
 
 
 def _safe_error(code: str, message: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1159,4 +1177,6 @@ __all__ = [
     "propose_remediation",
     "simulate_remediation",
     "record_engineer_feedback",
+    "register_runtime_incident",
+    "clear_runtime_incidents",
 ]

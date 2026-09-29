@@ -1,5 +1,6 @@
 from unittest.mock import patch
 import time
+import threading
 
 import pytest
 
@@ -15,6 +16,23 @@ async def test_postgres_unavailable_reports_degraded_retryable_readiness():
     assert result["status"] == "degraded"
     assert result["retryable"] is True
     assert result["services"]["postgresql"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_organizational_memory_runs_sync_hindsight_client_off_event_loop(monkeypatch):
+    from backend.app.api.v1.endpoints.incidents import get_organizational_memory
+
+    event_loop_thread = threading.get_ident()
+    client_thread = []
+
+    def recall(**kwargs):
+        client_thread.append(threading.get_ident())
+        return {"available": True, "categories": {}}
+
+    monkeypatch.setattr("backend.app.api.v1.endpoints.incidents.hindsight_service.recall_organizational_memories", recall)
+    result = await get_organizational_memory(incident_id="INC-TEST", service="payment-api", query="pool failure", limit=5)
+    assert result["available"] is True
+    assert client_thread and client_thread[0] != event_loop_thread
 
 
 @pytest.mark.asyncio
@@ -76,10 +94,30 @@ def test_remediation_simulation_failure_blocks_without_claiming_recovery():
     assert state.retryable is True
 
 
+def test_unknown_simulation_outcome_blocks_and_does_not_retain_success():
+    unknown = {"ok": True, "data": {"predicted_outcome": "unknown"}}
+    with patch("backend.app.tools.simulate_remediation", return_value=unknown):
+        state = IncidentOrchestrator().run("INC-H101", approval_override={"approved": True})
+    assert state.status == "blocked"
+    assert state.execution["status"] == "failed"
+    assert state.verification is None
+    assert state.postmortem is None
+
+
 def test_rejected_remediation_keeps_incident_and_never_executes():
     state = IncidentOrchestrator().run("INC-H101", approval_override={"approved": False, "reason": "unsafe"})
     assert state.status == "blocked"
     assert state.incident is not None
+    assert state.execution is None
+    assert state.current_step == "HUMAN_APPROVAL"
+
+
+def test_approval_for_action_outside_current_plan_does_not_execute():
+    state = IncidentOrchestrator().run(
+        "INC-H101",
+        approval_override={"approved": True, "action": "UNRELATED_ACTION"},
+    )
+    assert state.status == "blocked"
     assert state.execution is None
     assert state.current_step == "HUMAN_APPROVAL"
 

@@ -172,7 +172,7 @@ class IncidentOrchestrator:
                 action_type=approved_action,
                 parameters={"action": approved_action, "workflow": "incident_orchestrator"},
                 rationale="Approved by human operator after diagnosis and verification.",
-                outcome_notes="Action was validated as successful by the incident workflow.",
+                outcome_notes="The dry-run simulator predicted success; production telemetry was not verified.",
             )
 
         if state.postmortem:
@@ -309,14 +309,25 @@ class IncidentOrchestrator:
             return state
 
         from backend.app.tools import simulate_remediation
-        proposed_action = (remediation_plan.get("recommended_actions") or [{}])[0].get("action")
+        recommended_actions = remediation_plan.get("recommended_actions") or []
+        proposed_action = recommended_actions[0].get("action") if recommended_actions and isinstance(recommended_actions[0], dict) else None
+        approved_action = str(approval.get("action") or proposed_action or "")
+        if not proposed_action or approved_action != proposed_action:
+            state.status = "blocked"
+            state.retryable = True
+            self._add_warning(state, "Approval does not match the current recommended action; review and approve the current plan.")
+            self._record(state, "HUMAN_APPROVAL", "error", "Approval did not match the current remediation action.")
+            state.current_step = "HUMAN_APPROVAL"
+            return state
         simulation = self._invoke(state, "EXECUTION", simulate_remediation, {"ok": False, "error": {"code": "simulation_unavailable"}}, {
             "service": str(incident.get("service") or "unknown"),
             "incident_id": incident_id,
-            "action_type": proposed_action or "CHECK_DEPENDENCY_HEALTH",
+            "action_type": approved_action,
             "dry_run": True,
         })
-        if not simulation.get("ok") or simulation.get("data", {}).get("predicted_outcome") == "likely_failure":
+        simulation_data = simulation.get("data") if isinstance(simulation, dict) else None
+        outcome = simulation_data.get("predicted_outcome") if isinstance(simulation_data, dict) else None
+        if not simulation.get("ok") or outcome != "likely_success":
             state.execution = {"status": "failed", "details": "Remediation simulation failed or predicted failure; no action was executed. Retry after reviewing the evidence."}
             state.retryable = True
             self._add_warning(state, state.execution["details"])
@@ -327,19 +338,15 @@ class IncidentOrchestrator:
 
         state.execution = {
             "status": "approved",
-            "approved_action": (remediation_plan.get("recommended_actions") or [{}])[0].get("action") if remediation_plan.get("recommended_actions") else "UNKNOWN_ACTION",
+            "approved_action": approved_action,
             "details": "Approved remediation simulated successfully. No production command was executed.",
         }
         self._record(state, "HUMAN_APPROVAL", "ok", "Human approval granted.")
         self._record(state, "EXECUTION", "ok", "Execution step completed in simulation mode.")
 
         state.verification = {
-            "status": "verified",
-            "checks": [
-                "Telemetry returned to nominal range",
-                "No downstream dependency failures were introduced",
-                "Runbook constraints remained satisfied",
-            ],
+            "status": "simulation_passed",
+            "checks": ["The remediation simulator predicted a successful outcome; production telemetry was not verified."],
         }
         self._record(state, "VERIFICATION", "ok", "Verification passed.")
 

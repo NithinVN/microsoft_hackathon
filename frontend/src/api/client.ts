@@ -147,6 +147,20 @@ export async function retryIncidentAnalysis(idOrIncidentId: string): Promise<{
   return response.json();
 }
 
+export async function retainDemoOutcome(): Promise<{
+  status: 'retained' | 'unavailable';
+  retained: boolean;
+  bank_id: string;
+  message: string;
+}> {
+  const response = await fetch(`${API_BASE_URL}/incidents/demo/retain`, {
+    method: 'POST',
+    headers: { 'Accept': 'application/json' },
+  });
+  if (!response.ok) throw new Error(`Hindsight demo retention failed: ${response.statusText}`);
+  return response.json();
+}
+
 export async function createIncidentApi(payload: {
   incident_id: string;
   title: string;
@@ -185,6 +199,7 @@ export async function getOrganizationalMemory(params: {
   incidentId: string;
   service: string;
   query: string;
+  signal?: AbortSignal;
 }): Promise<OrganizationalMemoryResult> {
   const query = new URLSearchParams({
     incident_id: params.incidentId,
@@ -193,6 +208,7 @@ export async function getOrganizationalMemory(params: {
   });
   const response = await fetch(`${API_BASE_URL}/incidents/organizational-memory?${query.toString()}`, {
     headers: { 'Accept': 'application/json' },
+    signal: params.signal,
   });
 
   if (!response.ok) {

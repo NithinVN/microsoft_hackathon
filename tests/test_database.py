@@ -313,13 +313,13 @@ async def test_postmortem_and_feedback_recording(db_session: AsyncSession):
         ),
     )
     assert postmortem.id is not None
-    assert postmortem.hindsight_retained is True
-    assert postmortem.hindsight_memory_id == "MEM-ORG-9901"
+    assert postmortem.hindsight_retained is False
+    assert postmortem.hindsight_memory_id is None
 
     retrieved = await repo.get_incident_by_id(incident.id)
     assert retrieved is not None
     assert retrieved.postmortem is not None
-    assert retrieved.postmortem.hindsight_retained is True
+    assert retrieved.postmortem.hindsight_retained is False
     assert len(retrieved.feedbacks) == 1
 
 
@@ -421,8 +421,8 @@ async def test_resolved_incident_generates_learning_loop_postmortem(db_session: 
     assert resolved.postmortem.what_failed
     assert resolved.postmortem.what_worked
     assert resolved.postmortem.lessons_learned
-    assert resolved.postmortem.hindsight_retained is True
-    assert resolved.postmortem.hindsight_memory_id is not None
+    assert resolved.postmortem.hindsight_retained is False
+    assert resolved.postmortem.hindsight_memory_id is None
 
 
 @pytest.mark.asyncio

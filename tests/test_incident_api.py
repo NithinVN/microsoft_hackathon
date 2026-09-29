@@ -113,7 +113,7 @@ def test_api_incident_lifecycle(client: TestClient):
     }
     pm_resp = client.post(f"/api/v1/incidents/{incident_pk}/postmortem", json=pm_payload)
     assert pm_resp.status_code == 201
-    assert pm_resp.json()["hindsight_retained"] is True
+    assert pm_resp.json()["hindsight_retained"] is False
 
     # 6. List incidents
     list_resp = client.get("/api/v1/incidents?severity=SEV-1")

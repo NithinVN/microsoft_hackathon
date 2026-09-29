@@ -1,9 +1,11 @@
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, List, Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.app.core.logging import logger
 from backend.app.models.incident import Incident, IncidentEvent
 from backend.app.models.investigation import Diagnosis, Investigation
 from backend.app.models.postmortem import EngineerFeedback, Postmortem
@@ -390,7 +392,8 @@ class IncidentRepository:
             future_prevention=data.future_prevention,
             corrective_actions=data.corrective_actions,
             timeline=data.timeline,
-            hindsight_retained=data.hindsight_retained,
+            # This records confirmed completion, not the caller's intent to retain.
+            hindsight_retained=False,
             hindsight_memory_id=memory_id,
             created_at=utcnow(),
             updated_at=utcnow(),
@@ -403,8 +406,23 @@ class IncidentRepository:
         incident.postmortem = postmortem
         await self.session.commit()
 
+        retained = False
         if data.hindsight_retained:
             from backend.app.memory.hindsight_service import hindsight_service
+
+            def retain(method: str, **kwargs: Any) -> Any:
+                try:
+                    return getattr(hindsight_service, method)(**kwargs)
+                except Exception as exc:
+                    logger.exception("Hindsight postmortem retention failed", extra={
+                        "incident_id": incident.incident_id,
+                        "operation": method,
+                        "error_type": type(exc).__name__,
+                        "retryable": True,
+                    })
+                    return {"success": False}
+
+            retain_results = []
 
             incident_payload = {
                 "incident_id": incident.incident_id,
@@ -418,8 +436,8 @@ class IncidentRepository:
                 "resolution": "; ".join(data.corrective_actions or data.what_worked or ["Incident resolved"]),
                 "detected_at": incident.detected_at.isoformat(),
             }
-            hindsight_service.retain_incident(incident_payload)
-            hindsight_service.retain_root_cause(
+            retain_results.append(await asyncio.to_thread(retain, "retain_incident", incident_data=incident_payload))
+            retain_results.append(await asyncio.to_thread(retain, "retain_root_cause",
                 incident_id=incident.incident_id,
                 service=incident.affected_service,
                 root_cause=data.root_cause,
@@ -428,7 +446,7 @@ class IncidentRepository:
                     "why_it_failed": data.why_it_failed,
                     "timeline": data.timeline,
                 },
-            )
+            ))
 
             remediation_map = {remediation.id: remediation for remediation in incident.remediations or []}
             for execution in incident.executions or []:
@@ -445,42 +463,50 @@ class IncidentRepository:
                 }
                 normalized_status = str(execution.status or "").upper()
                 if normalized_status in {"VERIFIED_RECOVERED", "APPROVED", "SUCCESS", "RECOVERED", "RESOLVED"}:
-                    hindsight_service.retain_successful_fix(
+                    retain_results.append(await asyncio.to_thread(retain, "retain_successful_fix",
                         incident_id=incident.incident_id,
                         service=incident.affected_service,
                         action_type=remediation.action_key,
                         parameters=params,
                         rationale=execution.approval_notes or remediation.description,
                         outcome_notes=execution.execution_output or data.actual_outcome or "Recovery verified.",
-                    )
+                    ))
                 else:
-                    hindsight_service.retain_failed_fix(
+                    retain_results.append(await asyncio.to_thread(retain, "retain_failed_fix",
                         incident_id=incident.incident_id,
                         service=incident.affected_service,
                         action_type=remediation.action_key,
                         parameters=params,
                         failure_reason=execution.approval_notes or execution.execution_output or "Failed remediation action was attempted during the incident.",
                         unintended_consequences=execution.execution_output or "Action failed and was not retained as the final fix.",
-                    )
+                    ))
 
             for feedback in incident.feedbacks or []:
-                hindsight_service.retain_engineer_feedback(
+                retain_results.append(await asyncio.to_thread(retain, "retain_engineer_feedback",
                     incident_id=incident.incident_id,
                     service=incident.affected_service,
                     engineer_id=feedback.engineer_id,
                     rating=f"{feedback.rating}_stars",
                     feedback_text=feedback.comments,
                     tags=["postmortem", "engineer_correction"],
-                )
+                ))
 
-            hindsight_service.retain_postmortem(
+            retain_results.append(await asyncio.to_thread(retain, "retain_postmortem",
                 incident_id=incident.incident_id,
                 service=incident.affected_service,
                 executive_summary=data.what_happened or incident.description or data.incident_summary,
                 root_cause_analysis=data.root_cause,
                 lessons_learned=data.lessons_learned or ["Incident was resolved with evidence-based remediation."],
                 preventive_actions=data.corrective_actions or ["Monitor and harden the service against the root cause."],
+            ))
+            retained = bool(retain_results) and all(
+                isinstance(result, dict) and result.get("success") is True
+                for result in retain_results
             )
+            postmortem.hindsight_retained = retained
+            if not retained:
+                postmortem.hindsight_memory_id = None
+            await self.session.commit()
 
         # Timeline event
         await self.add_event(
@@ -488,8 +514,8 @@ class IncidentRepository:
             data=IncidentEventCreate(
                 event_type="POSTMORTEM_SAVED",
                 actor="PostmortemAgent",
-                message=f"Postmortem saved: {data.title} (Duration: {data.duration_minutes}m, Retained: {data.hindsight_retained})",
-                payload={"postmortem_id": postmortem_id, "hindsight_retained": data.hindsight_retained, "hindsight_memory_id": memory_id},
+                message=f"Postmortem saved: {data.title} (Duration: {data.duration_minutes}m, Retained: {postmortem.hindsight_retained})",
+                payload={"postmortem_id": postmortem_id, "hindsight_retained": postmortem.hindsight_retained, "hindsight_memory_id": postmortem.hindsight_memory_id},
             ),
         )
         return postmortem

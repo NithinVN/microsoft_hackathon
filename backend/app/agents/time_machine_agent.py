@@ -57,11 +57,12 @@ def _read_historical_dataset() -> List[Dict[str, Any]]:
 
 
 def _candidate_matches_action(candidate: Dict[str, Any], action_type: str) -> bool:
-    lowered = (action_type or "").lower()
-    for keyword in candidate.get("keywords", []):
-        if keyword.lower() in lowered:
-            return True
-    return candidate["action"].lower() in lowered
+    # Match action identifiers exactly. Substring matching made
+    # RESTART_SERVICE match RESTART_DATABASE and corrupted historical counts.
+    normalize = lambda value: "_".join(str(value or "").strip().lower().replace("-", "_").split())
+    target = normalize(candidate.get("action"))
+    actual = normalize(action_type)
+    return bool(target and actual and target == actual)
 
 
 def _safe_hindsight_matches(service: Optional[str], action: str) -> List[Dict[str, Any]]:

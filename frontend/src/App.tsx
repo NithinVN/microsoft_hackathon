@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   Activity,
   ArrowDown,
@@ -15,9 +15,14 @@ import {
   ShieldCheck,
   TimerReset,
   TriangleAlert,
+  Play,
+  CircleCheck,
+  Circle,
+  PauseCircle,
 } from 'lucide-react';
 import { MOCK_SCENARIOS } from './mock/incidentScenarios';
-import { fetchHealth, getOrganizationalMemory, HealthCheckResponse, OrganizationalMemoryCategory, OrganizationalMemoryResult } from './api/client';
+import { fetchHealth, getOrganizationalMemory, retainDemoOutcome, HealthCheckResponse, OrganizationalMemoryCategory, OrganizationalMemoryResult } from './api/client';
+import { createPaymentApiDemoMemory, createPaymentApiDemoScenario, DEMO_INCIDENT_ID, DEMO_STEPS, HINDSIGHT_AB_COMPARISON } from './mock/paymentApiDemo';
 import type { IncidentScenario } from './types/incident';
 import './App.css';
 
@@ -26,6 +31,7 @@ type ScreenKey =
   | 'activeIncident'
   | 'timeline'
   | 'memory'
+  | 'hindsightAB'
   | 'diagnosis'
   | 'blastRadius'
   | 'timeMachine'
@@ -38,6 +44,7 @@ const screens: Array<{ key: ScreenKey; label: string; icon: any }> = [
   { key: 'activeIncident', label: 'Active Incident', icon: Activity },
   { key: 'timeline', label: 'Incident Timeline', icon: Clock3 },
   { key: 'memory', label: 'Organizational Memory', icon: MemoryStick },
+  { key: 'hindsightAB', label: 'Hindsight A/B', icon: BrainCircuit },
   { key: 'diagnosis', label: 'Diagnosis', icon: BrainCircuit },
   { key: 'blastRadius', label: 'Blast Radius', icon: Network },
   { key: 'timeMachine', label: 'Time Machine', icon: TimerReset },
@@ -46,7 +53,7 @@ const screens: Array<{ key: ScreenKey; label: string; icon: any }> = [
   { key: 'learning', label: 'Learning', icon: Radar },
 ];
 
-type EvidenceSource = 'Current telemetry' | 'Hindsight' | 'RAG';
+type EvidenceSource = 'Current telemetry' | 'Hindsight' | 'RAG' | 'AI inference';
 
 const evidenceSourceFor = (text: string): EvidenceSource => {
   if (/hindsight|historical|memory recall|prior incident|INC-\d+/i.test(text)) return 'Hindsight';
@@ -67,6 +74,7 @@ const screenTitles: Record<ScreenKey, { title: string; eyebrow: string }> = {
   activeIncident: { title: 'Active incident', eyebrow: 'Live response / demo scenario' },
   timeline: { title: 'Incident timeline', eyebrow: 'Response record' },
   memory: { title: 'Organizational memory', eyebrow: 'Hindsight knowledge bank' },
+  hindsightAB: { title: 'Hindsight A/B demonstration', eyebrow: 'Same incident · two evidence contexts' },
   diagnosis: { title: 'Diagnosis', eyebrow: 'Evidence assessment' },
   blastRadius: { title: 'Blast radius', eyebrow: 'Service impact' },
   timeMachine: { title: 'Incident time machine', eyebrow: 'What-if analysis' },
@@ -122,6 +130,14 @@ export function App() {
   const [loadingMemory, setLoadingMemory] = useState<boolean>(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [memoryRetry, setMemoryRetry] = useState(0);
+  const [demoMode, setDemoMode] = useState(false);
+  const [demoRunning, setDemoRunning] = useState(false);
+  const [demoProgress, setDemoProgress] = useState(0);
+  const [demoApproved, setDemoApproved] = useState(false);
+  const [demoRejected, setDemoRejected] = useState(false);
+  const [demoCloudRetention, setDemoCloudRetention] = useState<'not-started' | 'pending' | 'retained' | 'unavailable'>('not-started');
+  const [secondDemoIncident, setSecondDemoIncident] = useState(false);
+  const demoMemoryRequests = useRef<Set<string>>(new Set());
 
   const activeCount = MOCK_SCENARIOS.filter((entry) => entry.status !== 'RESOLVED' && entry.status !== 'POSTMORTEM_SAVED').length;
   const affectedServiceCount = new Set(MOCK_SCENARIOS.flatMap((entry) => entry.blastRadius.nodes.filter((node) => node.affected).map((node) => node.name))).size;
@@ -149,6 +165,65 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     const loadMemory = async () => {
+      if (demoMode) {
+        setMemoryError(null);
+        if (demoProgress < 6) {
+          setLoadingMemory(false);
+          setOrganizationalMemory(null);
+          return;
+        }
+        const fixture = createPaymentApiDemoMemory(demoProgress >= 20 || secondDemoIncident, secondDemoIncident);
+        if (demoProgress >= 20 && !secondDemoIncident) {
+          setOrganizationalMemory(fixture);
+          setLoadingMemory(false);
+          return;
+        }
+        const requestKey = activeScenario.id;
+        if (demoMemoryRequests.current.has(requestKey)) return;
+        demoMemoryRequests.current.add(requestKey);
+        setLoadingMemory(true);
+        if (!health?.services?.hindsight_configured) {
+          setOrganizationalMemory(fixture);
+          setLoadingMemory(false);
+          return;
+        }
+        try {
+          const live = await getOrganizationalMemory({
+            incidentId: activeScenario.id,
+            service: activeScenario.service,
+            query: secondDemoIncident
+              ? 'Similar payment API connection saturation; prior pool correction outcome and failed database restart'
+              : 'Payment API connection pool saturation failed restart successful pool correction deployment',
+            signal: AbortSignal.timeout(6500),
+          });
+          if (!cancelled) {
+            if (live.status === 'available' && live.retrieved_memories.length && secondDemoIncident) {
+              const lessons = fixture.categories.postmortem_lessons;
+              const existingIds = new Set(live.categories.postmortem_lessons.map((record) => record.id));
+              const addedLessons = lessons.filter((record) => !existingIds.has(record.id));
+              const categories = {
+                ...live.categories,
+                postmortem_lessons: [...live.categories.postmortem_lessons, ...addedLessons],
+              };
+              const mergedRecords = [...live.retrieved_memories, ...addedLessons];
+              setOrganizationalMemory({
+                ...live,
+                current_incident: fixture.current_incident,
+                categories,
+                retrieved_memories: mergedRecords,
+                agent_evidence: [...live.agent_evidence, ...addedLessons],
+              });
+            } else {
+              setOrganizationalMemory(live.status === 'available' && live.retrieved_memories.length ? live : fixture);
+            }
+          }
+        } catch {
+          if (!cancelled) setOrganizationalMemory(fixture);
+        } finally {
+          if (!cancelled) setLoadingMemory(false);
+        }
+        return;
+      }
       setLoadingMemory(true);
       setMemoryError(null);
       const query = [
@@ -175,7 +250,102 @@ export function App() {
 
     void loadMemory();
     return () => { cancelled = true; };
-  }, [activeScenario.id, memoryRetry]);
+  }, [activeScenario.id, activeScenario.service, health?.services?.hindsight_configured, memoryRetry, demoMode, demoProgress, secondDemoIncident]);
+
+  useEffect(() => {
+    if (!demoMode) return;
+    setActiveScenario(createPaymentApiDemoScenario(
+      !secondDemoIncident && demoProgress >= 17,
+      !secondDemoIncident && demoProgress >= 18,
+      !secondDemoIncident && demoProgress >= 20,
+      !secondDemoIncident && demoProgress >= 19,
+      secondDemoIncident,
+    ));
+    if (demoProgress >= DEMO_STEPS.length) setDemoRunning(false);
+  }, [demoMode, demoProgress, secondDemoIncident]);
+
+  useEffect(() => {
+    if (!demoMode) return;
+    if (secondDemoIncident) {
+      setScreen('activeIncident');
+    } else if (demoProgress >= 20) {
+      setScreen('memory');
+    } else if (demoProgress >= 19) {
+      setScreen('memory');
+    } else if (demoProgress >= 18) {
+      setScreen('postmortem');
+    } else if (demoProgress >= 15) {
+      setScreen('activeIncident');
+    } else if (demoProgress >= 11) {
+      setScreen('timeMachine');
+    } else if (demoProgress >= 10) {
+      setScreen('diagnosis');
+    } else if (demoProgress >= 6) {
+      setScreen('memory');
+    } else {
+      setScreen('activeIncident');
+    }
+  }, [demoMode, demoProgress, secondDemoIncident]);
+
+  useEffect(() => {
+    if (!demoRunning) return;
+    if (demoProgress >= 14 && !demoApproved) {
+      setDemoRunning(false);
+      return;
+    }
+    if (demoProgress === 20 && !secondDemoIncident) {
+      setDemoRunning(false);
+      return;
+    }
+    if ((demoProgress === 6 || demoProgress === 21) && loadingMemory) return;
+    if (demoProgress >= DEMO_STEPS.length) {
+      setDemoRunning(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setDemoProgress((progress) => Math.min(DEMO_STEPS.length, progress + 1)), 2200);
+    return () => window.clearTimeout(timer);
+  }, [demoRunning, demoProgress, demoApproved, secondDemoIncident, loadingMemory]);
+
+  useEffect(() => {
+    if (!demoMode || secondDemoIncident || demoProgress < 20 || demoCloudRetention !== 'not-started') return;
+    setDemoCloudRetention('pending');
+    void retainDemoOutcome()
+      .then((result) => setDemoCloudRetention(result.retained ? 'retained' : 'unavailable'))
+      .catch(() => setDemoCloudRetention('unavailable'));
+  }, [demoMode, demoProgress, demoCloudRetention, secondDemoIncident]);
+
+  const startDemo = () => {
+    setDemoMode(true);
+    setDemoProgress(0);
+    setDemoApproved(false);
+    setDemoRejected(false);
+    setDemoCloudRetention('not-started');
+    setSecondDemoIncident(false);
+    demoMemoryRequests.current.clear();
+    setOrganizationalMemory(null);
+    setScreen('dashboard');
+    setActiveScenario(createPaymentApiDemoScenario());
+    setDemoRunning(true);
+  };
+
+  const approveDemo = () => {
+    setDemoApproved(true);
+    setDemoRejected(false);
+    setDemoProgress(15);
+    setDemoRunning(true);
+  };
+
+  const rejectDemo = () => {
+    setDemoRejected(true);
+    setDemoRunning(false);
+  };
+
+  const startSecondDemoIncident = () => {
+    setSecondDemoIncident(true);
+    setDemoProgress(21);
+    setDemoRunning(true);
+    setScreen('activeIncident');
+  };
 
   const timelineEntries = activeScenario.postmortem.timeline.length
     ? activeScenario.postmortem.timeline
@@ -190,6 +360,7 @@ export function App() {
 
   return (
     <div className="command-center-shell">
+      <a className="skip-link" href="#main-content">Skip to incident workspace</a>
       <header className="topbar">
         <div className="brand-wrap">
           <div className="brand-mark">IC</div>
@@ -205,7 +376,11 @@ export function App() {
             <select
               value={activeScenario.id}
               onChange={(event) => {
-                const nextScenario = MOCK_SCENARIOS.find((entry) => entry.id === event.target.value) ?? MOCK_SCENARIOS[0];
+                const nextScenario = event.target.value === DEMO_INCIDENT_ID
+                  ? createPaymentApiDemoScenario()
+                  : MOCK_SCENARIOS.find((entry) => entry.id === event.target.value) ?? MOCK_SCENARIOS[0];
+                setDemoMode(event.target.value === DEMO_INCIDENT_ID);
+                setDemoRunning(false);
                 setActiveScenario(nextScenario);
               }}
             >
@@ -214,8 +389,13 @@ export function App() {
                   {scenario.id} • {scenario.service}
                 </option>
               ))}
+              {demoMode && <option value={DEMO_INCIDENT_ID}>{DEMO_INCIDENT_ID} • payment-api demo</option>}
             </select>
           </label>
+
+          <button className="primary-button demo-launch-button" type="button" onClick={startDemo}>
+            <Play size={15} /> {demoMode ? 'Restart Demo' : 'Demo Mode'}
+          </button>
 
           <div className="header-badges">
             <span className={`header-badge ${health?.status === 'healthy' ? 'header-badge--good' : 'header-badge--warn'}`}>
@@ -238,7 +418,7 @@ export function App() {
       </header>
 
       <div className="workspace-shell">
-        <aside className="sidebar">
+        <aside className="sidebar" aria-label="Incident response workspace">
           {screens.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
@@ -253,14 +433,72 @@ export function App() {
           ))}
         </aside>
 
-        <main className="content-panel">
+        <main className="content-panel" id="main-content" tabIndex={-1}>
           <div className="page-heading">
             <div>
               <div className="eyebrow">{screenTitles[screen].eyebrow}</div>
               <h2>{screenTitles[screen].title}</h2>
             </div>
-            <span className="demo-label">SCENARIO DATA</span>
+            <span className="demo-label">{demoMode ? 'DETERMINISTIC DEMO' : 'SCENARIO DATA'}</span>
           </div>
+          {demoMode && (
+            <section className="demo-memory-used" aria-label="Memory Used">
+              <div className="demo-memory-used__heading">
+                <MemoryStick size={16} />
+                <strong>Memory Used</strong>
+                <span>Provenance stays visible throughout the demo</span>
+              </div>
+              <div className="demo-memory-used__grid">
+                <div><span className="evidence-pill evidence-pill--current-telemetry">Current evidence</span><p>{activeScenario.currentEvidence.telemetrySummary}</p></div>
+                <div><span className="evidence-pill evidence-pill--hindsight">Hindsight memory</span><p>{demoProgress >= 6 ? organizationalMemory?.health.status === 'demo-fixture' ? 'Seeded memory fixture INC-419: hard restart failed; pool correction succeeded.' : organizationalMemory?.status === 'available' ? `Live Hindsight recall returned ${organizationalMemory.retrieved_memories.length} records.` : 'Hindsight returned no matching records; the labeled demo memory fixture is shown.' : 'Historical records load at the memory-recall step.'}{demoProgress >= 20 && !secondDemoIncident ? ` First demo outcome: ${demoCloudRetention === 'retained' ? 'retained to Hindsight Cloud.' : demoCloudRetention === 'pending' ? 'Cloud retain pending; local demo lesson is available.' : 'Cloud unavailable; local demo lesson remains available.'}` : ''}{secondDemoIncident ? ' INC-DEMO-002 uses the deterministic retained lesson and avoids the failed restart.' : ''}</p></div>
+                <div><span className="evidence-pill evidence-pill--rag">RAG knowledge</span><p>PostgreSQL Connection Pool Troubleshooting: inspect idle sessions, drain/reap safely, then adjust pool capacity.</p></div>
+                <div><span className="evidence-pill evidence-pill--ai-inference">AI inference</span><p>Deterministic agent assessment (not a Groq response): likely connection-pool exhaustion after deployment.</p></div>
+              </div>
+            </section>
+          )}
+          {demoMode && (
+            <section className="demo-run-panel">
+              <div className="demo-run-header">
+                <div>
+                  <span className="memory-kicker">{demoProgress >= DEMO_STEPS.length ? 'DEMO COMPLETE' : demoProgress >= 20 && !secondDemoIncident ? 'FIRST INCIDENT RESOLVED' : demoProgress >= 14 && !demoApproved ? 'HUMAN APPROVAL REQUIRED' : demoRunning ? 'DEMO RUNNING' : demoRejected ? 'DEMO PAUSED' : 'DEMO READY'}</span>
+                  <h3>{secondDemoIncident ? 'Payment API recurrence' : 'Payment API incident'} · {demoProgress}/{DEMO_STEPS.length} steps complete</h3>
+                  <p>Incident Simulator · deterministic telemetry, seeded Hindsight history, and local runbook context. No Azure or PagerDuty connection required.</p>
+                </div>
+                <span className={`status-badge ${demoRejected ? 'status-badge--fail' : demoProgress >= 20 ? 'status-badge--success' : demoProgress >= 14 && !demoApproved ? 'status-badge--neutral' : 'status-badge--success'}`}>
+                  {demoRejected ? 'Rejected' : demoProgress >= DEMO_STEPS.length ? 'Memory reused' : demoProgress >= 20 ? 'First run resolved' : demoProgress >= 14 && !demoApproved ? 'Awaiting approval' : 'Running'}
+                </span>
+              </div>
+              <progress className="demo-progress" max={DEMO_STEPS.length} value={demoProgress} aria-label={`Incident workflow progress: ${demoProgress} of ${DEMO_STEPS.length} steps`} />
+              <span className="sr-only" role="status" aria-live="polite">{demoProgress >= DEMO_STEPS.length ? 'Incident workflow complete.' : demoProgress === 14 && !demoApproved ? 'Waiting for human approval.' : `Workflow step ${demoProgress + 1}: ${DEMO_STEPS[demoProgress]?.title ?? 'in progress'}.`}</span>
+              {demoProgress >= 14 && !demoApproved && !demoRejected && (
+                <div className="demo-approval-gate">
+                  <div><strong>Approve simulated pool correction?</strong><p>Database restart is blocked by INC-419 failed-fix evidence.</p></div>
+                  <button className="primary-button" type="button" onClick={approveDemo}>Approve &amp; continue</button>
+                  <button className="secondary-button" type="button" onClick={rejectDemo}>Reject</button>
+                </div>
+              )}
+              {demoRejected && <div className="state-banner state-banner--error" role="status">Engineer rejected remediation. No action ran; use Demo Mode to restart the deterministic scenario.</div>}
+              {demoProgress >= 20 && !secondDemoIncident && <div className="demo-retain-status" role="status">{demoCloudRetention === 'pending' ? 'Retaining outcome and lessons to Hindsight… Local demo lesson is ready for the second incident.' : demoCloudRetention === 'retained' ? 'Outcome and lessons retained to Hindsight Cloud; local demo lesson is ready for the second incident.' : 'Cloud retention unavailable. The deterministic local lesson remains available; no external retain is claimed.'}</div>}
+              {demoProgress === 20 && !secondDemoIncident && <button className="primary-button demo-second-incident-button" type="button" onClick={startSecondDemoIncident}>Trigger similar incident · INC-DEMO-002 <ArrowRight size={15} /></button>}
+              {demoProgress >= DEMO_STEPS.length && secondDemoIncident && <div className="demo-retain-status" role="status">INC-DEMO-002 reused the first incident’s lesson and avoided the historically failed database restart. This is a deterministic demo-memory replay.</div>}
+              <ol className="demo-step-list">
+                {DEMO_STEPS.map((step, index) => {
+                  const complete = index < demoProgress;
+                  const waiting = index === 14 && demoProgress === 14 && !demoApproved && !demoRejected;
+                  const rejected = index === 14 && demoRejected;
+                  const current = !complete && index === demoProgress && !waiting && !demoRejected && demoProgress < DEMO_STEPS.length;
+                  return (
+                    <li className={`demo-step ${complete ? 'demo-step--complete' : waiting || rejected ? 'demo-step--waiting' : current ? 'demo-step--current' : ''}`} key={step.title}>
+                      <span className="demo-step__icon">{complete ? <CircleCheck size={16} /> : waiting ? <PauseCircle size={16} /> : <Circle size={16} />}</span>
+                      <span className="demo-step__number">{String(index + 1).padStart(2, '0')}</span>
+                      <div><strong>{step.title}</strong><p>{step.detail}</p></div>
+                      <span className="demo-step__state">{complete ? 'Done' : rejected ? 'Rejected' : waiting ? 'Approval' : current ? 'Running' : 'Pending'}</span>
+                    </li>
+                  );
+                })}
+              </ol>
+            </section>
+          )}
           {loadingHealth && <div className="state-banner state-banner--info" role="status">Checking service health...</div>}
           {healthError && <div className="state-banner state-banner--error" role="alert"><span>{healthError}</span><button type="button" className="text-button" onClick={loadHealth}>Retry</button></div>}
 
@@ -314,7 +552,7 @@ export function App() {
                     <span>System health</span>
                     <HeartPulse size={16} />
                   </div>
-                  <strong>{loadingHealth ? 'Checking' : health?.status ?? 'Unknown'}</strong>
+                  {loadingHealth ? <span className="skeleton skeleton-text" role="status" aria-label="Loading system health" /> : <strong>{healthError ? 'Unavailable' : health?.status ?? 'Unknown'}</strong>}
                   <p>{health?.environment ?? 'Environment unavailable'}</p>
                 </article>
               </section>
@@ -356,7 +594,7 @@ export function App() {
                     ].map(({ key: service, state }) => (
                       <div key={service} className="health-row">
                         <span>{service}</span>
-                        <div className="health-bar"><i className={state === 'healthy' || state === 'configured' || state === 'available' || state === 'true' ? 'health-bar__fill--good' : 'health-bar__fill--unknown'} /></div>
+                        <span className={`health-indicator ${state === 'healthy' || state === 'configured' || state === 'available' || state === 'true' ? 'health-indicator--good' : state === 'unavailable' || state === 'not configured' ? 'health-indicator--warn' : 'health-indicator--unknown'}`} aria-hidden="true" />
                         <strong>{String(state).replace(/_/g, ' ')}</strong>
                       </div>
                     ))}
@@ -414,8 +652,9 @@ export function App() {
                     </div>
                     <div className="info-item">
                       <span className="label">Response time</span>
-                      <strong>4m 21s</strong>
+                      <strong>{demoMode && activeScenario.status === 'RESOLVED' ? '6m' : demoMode ? 'In progress' : '4m 21s'}</strong>
                     </div>
+                    {demoMode && !secondDemoIncident && <div className="info-item"><span className="label">Recent deployment</span><strong>v2.8.4 · 09:24 UTC</strong></div>}
                   </div>
 
                   <div className="mini-metrics">
@@ -431,6 +670,7 @@ export function App() {
                       <span>Host CPU</span>
                       <strong>{latestCpu}</strong>
                     </div>
+                    {demoMode && <div><span>DB pool</span><strong>{!secondDemoIncident && demoProgress >= 17 ? '52%' : '98%'}</strong></div>}
                   </div>
                 </div>
 
@@ -452,13 +692,11 @@ export function App() {
                 </div>
 
                 <div className="panel right-column">
-                  <div className="section-header">
-                    <h3>Diagnosis</h3>
-                  </div>
+                  <div className="section-header"><h3>Diagnosis</h3>{demoMode && sourcePill('AI inference')}</div>
                   <div className="diagnosis-block">
                     <div className="diagnosis-row">
-                      <span>Confidence</span>
-                      <strong>{Math.round(activeScenario.aiInference.confidence * 100)}%</strong>
+                      <span>Assessment basis</span>
+                      <strong>{demoMode ? 'Evidence-linked · deterministic' : `${Math.round(activeScenario.aiInference.confidence * 100)}%`}</strong>
                     </div>
                     <div className="diagnosis-row">
                       <span>Evidence</span>
@@ -477,6 +715,22 @@ export function App() {
                   </div>
                 </div>
               </section>
+              {demoMode && (
+                <section className="demo-evidence-grid">
+                  <article className="panel">
+                    <div className="section-header"><h3>Investigation metrics</h3><span className="evidence-pill evidence-pill--current-telemetry">Current telemetry</span></div>
+                    <p className="demo-evidence-summary">{activeScenario.currentEvidence.telemetrySummary}</p>
+                    <div className="demo-metric-trend">
+                      <div><span>Error rate trend</span><strong>{activeScenario.currentEvidence.metrics.errorRate.map((metric) => metric.label).join(' → ')}</strong></div>
+                      <div><span>P99 latency trend</span><strong>{activeScenario.currentEvidence.metrics.latencyMs.map((metric) => metric.label).join(' → ')}</strong></div>
+                    </div>
+                  </article>
+                  <article className="panel">
+                    <div className="section-header"><h3>Payment API logs</h3><span className="status-badge status-badge--neutral">{activeScenario.currentEvidence.liveLogs.length} events</span></div>
+                    <ul className="demo-log-list">{activeScenario.currentEvidence.liveLogs.map((log) => <li key={log}><code>{log}</code></li>)}</ul>
+                  </article>
+                </section>
+              )}
             </div>
           )}
 
@@ -485,15 +739,55 @@ export function App() {
               <div className="section-header">
                 <h3>Incident timeline</h3>
               </div>
-              <div className="full-timeline">
+              <ol className="full-timeline" aria-label="Incident events in chronological order">
                 {timelineEntries.length ? timelineEntries.map((entry, idx) => (
-                  <div key={`${entry.time}-${idx}`} className="timeline-row">
+                  <li key={`${entry.time}-${idx}`} className="timeline-row">
                     <span>{entry.time}</span>
-                    <div className="timeline-separator" />
+                    <div className="timeline-separator" aria-hidden="true" />
                     <p>{entry.event}</p>
-                  </div>
-                )) : <div className="empty-state compact"><p>No timeline events recorded for this incident.</p></div>}
-              </div>
+                  </li>
+                )) : <li className="empty-state compact"><p>No timeline events recorded for this incident.</p></li>}
+              </ol>
+            </div>
+          )}
+
+          {screen === 'hindsightAB' && (
+            <div className="screen-stack">
+              <section className="panel hindsight-ab-intro">
+                <div>
+                  <span className="memory-kicker">Controlled evidence comparison</span>
+                  <h3>One incident snapshot, evaluated with and without organizational memory.</h3>
+                  <p>Both modes receive the exact same payment-api metrics, logs, and deployment context. Mode B adds six memory units retained from the seeded historical record INC-H101 (incident, root cause, two action outcomes, engineer feedback, and postmortem). This view compares evidence and recommendations only; it does not claim faster diagnosis or better operational performance.</p>
+                </div>
+                <div className="hindsight-ab-incident">
+                  <strong>Shared incident input</strong>
+                  <span>{HINDSIGHT_AB_COMPARISON.incident.service} · {HINDSIGHT_AB_COMPARISON.incident.context}</span>
+                  <ul>{HINDSIGHT_AB_COMPARISON.incident.symptoms.map((symptom) => <li key={symptom}>{symptom}</li>)}</ul>
+                </div>
+              </section>
+
+              <section className="hindsight-ab-grid" aria-label="Diagnosis mode comparison">
+                <article className="panel hindsight-ab-card">
+                  <div className="section-header"><div><span className="memory-kicker">Mode A</span><h3>Without memory</h3></div><span className="status-badge status-badge--neutral">0 historical records supplied</span></div>
+                  <div className="hindsight-ab-block"><span className="label">Reasoning</span><p>{HINDSIGHT_AB_COMPARISON.withoutMemory.diagnosis}</p></div>
+                  <div className="hindsight-ab-block"><span className="label">Recommendations produced · {HINDSIGHT_AB_COMPARISON.withoutMemory.recommendations.length}</span><ul>{HINDSIGHT_AB_COMPARISON.withoutMemory.recommendations.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                  <div className="hindsight-ab-block"><span className="label">Historical failed-fix warnings</span><p>None available in this mode.</p></div>
+                  <div className="hindsight-ab-block"><span className="label">Organizational lessons</span><p>None available in this mode.</p></div>
+                  <div className="hindsight-ab-block"><span className="label">Evidence references · {HINDSIGHT_AB_COMPARISON.withoutMemory.evidenceRefs.length}</span><p>{HINDSIGHT_AB_COMPARISON.withoutMemory.evidenceRefs.join(' · ')}</p></div>
+                </article>
+
+                <article className="panel hindsight-ab-card hindsight-ab-card--memory">
+                  <div className="section-header"><div><span className="memory-kicker">Mode B</span><h3>With Hindsight</h3></div><span className="status-badge status-badge--neutral">Seeded comparison · 1 incident</span></div>
+                  <div className="hindsight-ab-block"><span className="label">Reasoning</span><p>{HINDSIGHT_AB_COMPARISON.withHindsight.diagnosis}</p></div>
+                  <div className="hindsight-ab-block"><span className="label">Historical incident</span><p>{HINDSIGHT_AB_COMPARISON.withHindsight.historicalMatches[0]}</p></div>
+                  <div className="hindsight-ab-block"><span className="label">Recommendation produced · {HINDSIGHT_AB_COMPARISON.withHindsight.recommendations.length}</span><ul>{HINDSIGHT_AB_COMPARISON.withHindsight.recommendations.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                  <div className="hindsight-ab-block hindsight-ab-block--warning"><span className="label">Failed-fix warning</span><ul>{HINDSIGHT_AB_COMPARISON.withHindsight.failedFixWarnings.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                  <div className="hindsight-ab-block"><span className="label">Successful fix</span><ul>{HINDSIGHT_AB_COMPARISON.withHindsight.successfulFixes.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                  <div className="hindsight-ab-block"><span className="label">Engineer feedback and postmortem lessons</span><ul>{HINDSIGHT_AB_COMPARISON.withHindsight.lessons.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                  <div className="hindsight-ab-block"><span className="label">Evidence references · {HINDSIGHT_AB_COMPARISON.withHindsight.evidenceRefs.length}</span><p>{HINDSIGHT_AB_COMPARISON.withHindsight.evidenceRefs.join(' · ')}</p><small>{HINDSIGHT_AB_COMPARISON.withHindsight.source}</small></div>
+                </article>
+              </section>
+              <section className="panel hindsight-ab-footnote"><strong>Observable difference</strong><p>Mode B can cite an incident, a successful fix, a failed-fix warning, engineer feedback, and postmortem lessons. Mode A sees only the current incident evidence. The recommendation becomes more specific and carries a historical guardrail; no latency, accuracy, or time-saving metric is inferred.</p></section>
             </div>
           )}
 
@@ -504,7 +798,7 @@ export function App() {
                 <div>
                   <span className="memory-kicker">Organizational knowledge bank</span>
                   <h3>Hindsight connects today’s incident to accumulated operational experience.</h3>
-                  <p>Records below are returned directly by Hindsight for this incident context. No local seed-data fallback is shown.</p>
+                  <p>{demoMode ? organizationalMemory?.health.status === 'demo-fixture' ? 'Seeded local Hindsight fixture; remote retrieval was unavailable or not configured.' : 'Live Hindsight recall is shown when available; the second-incident lesson is labeled as a local demo replay.' : 'Records below are returned directly by Hindsight for this incident context. No local seed-data fallback is shown.'}</p>
                 </div>
                 <div className="memory-bank-status">
                   <span className={`status-badge ${organizationalMemory?.status === 'available' ? 'status-badge--success' : organizationalMemory?.status === 'unavailable' ? 'status-badge--fail' : 'status-badge--neutral'}`}>
@@ -570,8 +864,8 @@ export function App() {
                           </details>
                         </article>
                       )) : (
-                        <div className="empty-state compact">
-                          <p>{loadingMemory ? 'Querying Hindsight...' : organizationalMemory?.status === 'unavailable' ? 'Hindsight is unavailable. No substitute records are shown.' : 'No matching Hindsight records returned for this query.'}</p>
+                        <div className={`empty-state compact ${loadingMemory ? 'memory-loading-state' : ''}`} role={loadingMemory ? 'status' : undefined}>
+                          {loadingMemory ? <div className="skeleton-stack" aria-label="Loading Hindsight records"><i /><i /><i /></div> : <p>{organizationalMemory?.status === 'unavailable' ? 'Hindsight is unavailable. No substitute records are shown.' : 'No matching Hindsight records returned for this query.'}</p>}
                         </div>
                       )}
                     </section>
@@ -606,12 +900,12 @@ export function App() {
               </div>
               <div className="diagnosis-layout">
                 <div className="diagnosis-main">
-                  <div className="confidence-meter">
+                  {!demoMode && <div className="confidence-meter">
                     <div className="confidence-meter__fill" style={{ width: `${Math.round(activeScenario.aiInference.confidence * 100)}%` }} />
-                  </div>
+                  </div>}
                   <div className="diagnosis-summary-row">
-                    <span>Confidence</span>
-                    <strong>{Math.round(activeScenario.aiInference.confidence * 100)}%</strong>
+                    <span>{demoMode ? 'Reasoning mode' : 'Confidence'}</span>
+                    <strong>{demoMode ? 'Deterministic evidence ranking · not Groq' : `${Math.round(activeScenario.aiInference.confidence * 100)}%`}</strong>
                   </div>
                   <p className="diagnosis-body">{activeScenario.aiInference.rootCauseHypothesis}</p>
                 </div>
@@ -658,17 +952,17 @@ export function App() {
                   <div className="compare-card">
                     <span>Current telemetry</span>
                     <strong>Database saturating</strong>
-                    <p>Connection pool exhausted at 100/100 with 38% user-facing error rate.</p>
+                    <p>Connection pool at {demoMode ? (!secondDemoIncident && demoProgress >= 17 ? '52%' : '98%') : '100%'} utilization with {demoMode ? latestErrorRate : '38%'} user-facing errors and {demoMode ? latestLatency : '4200ms'} p99 latency.</p>
                   </div>
                   <div className="compare-card">
                     <span>Hindsight</span>
                     <strong>INC-419 precedent</strong>
-                    <p>Pool resize and idle connection drain resolved impact in 3 minutes without full DB restart.</p>
+                    <p>INC-419 reports a successful pool resize and idle-connection drain. The incident record reports a 28-minute resolution.</p>
                   </div>
                   <div className="compare-card">
                     <span>RAG</span>
                     <strong>Runbook</strong>
-                    <p>Section 4.2 corroborates idle transaction cleanup before high-risk service restarts.</p>
+                    <p>postgresql-connection-pool-troubleshooting.md recommends inspecting idle sessions, draining/reaping safely, then adjusting capacity.</p>
                   </div>
                 </div>
               </div>
@@ -728,8 +1022,8 @@ export function App() {
               <div className="panel">
                 <div className="section-header">
                   <h3>Postmortem</h3>
-                  <span className="status-badge status-badge--success">
-                    {activeScenario.postmortem.retainedToHindsight ? 'Retained' : 'Draft'}
+                  <span className={`status-badge ${activeScenario.postmortem.retainedToHindsight ? 'status-badge--success' : 'status-badge--neutral'}`}>
+                    {activeScenario.postmortem.retainedToHindsight ? (demoMode && demoCloudRetention !== 'retained' ? 'Retained in demo memory' : 'Retained to Hindsight') : 'Draft'}
                   </span>
                 </div>
                 <div className="postmortem-grid">

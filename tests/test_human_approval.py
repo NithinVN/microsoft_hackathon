@@ -27,7 +27,7 @@ def test_human_approval_requires_operator_token_outside_development(client: Test
     assert authorized.status_code == 404
 
 
-def test_human_approval_simulation_records_execution_and_marks_recovered(client: TestClient):
+def test_human_approval_does_not_claim_unverified_recovery(client: TestClient):
     incident_id = f"INC-APP-{uuid.uuid4().hex[:6]}"
 
     create = client.post(
@@ -63,10 +63,9 @@ def test_human_approval_simulation_records_execution_and_marks_recovered(client:
     assert body["action"] == "approve"
     assert body["original_recommendation"] == "Increase database connection pool from 50 to 100"
     assert body["execution_result"]["mode"] == "simulated"
-    assert body["execution_result"]["recovered"] is True
-    assert body["execution_result"]["before"]["db_connections_pct"] == 98
-    assert body["execution_result"]["after"]["db_connections_pct"] == 61
-    assert body["execution_result"]["after"]["error_rate_pct"] == 2
+    assert body["execution_result"]["recovered"] is False
+    assert body["execution_result"]["status"] == "APPROVED_PENDING_SIMULATION"
+    assert "No live command execution" in body["execution_result"]["details"]
 
 
 def test_human_approval_records_modified_recommendation_without_shell_execution(client: TestClient):
@@ -105,5 +104,5 @@ def test_human_approval_records_modified_recommendation_without_shell_execution(
     assert body["action"] == "modify"
     assert body["modified_recommendation"] == "Increase worker concurrency to 110 and enable retry backoff"
     assert body["execution_result"]["mode"] == "simulated"
-    assert body["execution_result"]["recovered"] is True
+    assert body["execution_result"]["recovered"] is False
     assert "shell" not in body["execution_result"]["details"].lower()

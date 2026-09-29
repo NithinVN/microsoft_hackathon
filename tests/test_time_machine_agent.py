@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.agents.time_machine_agent import build_time_machine_analysis
 from backend.app.main import app
+from backend.app.agents.time_machine_agent import _candidate_matches_action
 
 
 def test_build_time_machine_analysis_returns_historical_precedents_for_candidate_actions():
@@ -14,6 +15,12 @@ def test_build_time_machine_analysis_returns_historical_precedents_for_candidate
     assert breaker["historical_cases"]
     assert any("Historical evidence shows" in lesson for lesson in breaker["lessons"])
     assert breaker["caveats"]
+
+
+def test_time_machine_matches_action_identifiers_without_substring_collisions():
+    restart_service = {"action": "RESTART_SERVICE", "keywords": ["restart", "service"]}
+    assert _candidate_matches_action(restart_service, "RESTART_SERVICE")
+    assert not _candidate_matches_action(restart_service, "RESTART_DATABASE")
 
 
 def test_incident_time_machine_endpoint_returns_structured_json():

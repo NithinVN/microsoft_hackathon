@@ -1,3 +1,4 @@
+from backend.app.models.external_integration import ExternalWebsiteIntegration
 from backend.app.models.incident import (
     Alert,
     Deployment,
@@ -22,6 +23,7 @@ from backend.app.models.remediation import (
 __all__ = [
     "Alert",
     "Deployment",
+    "ExternalWebsiteIntegration",
     "Incident",
     "IncidentEvent",
     "Service",

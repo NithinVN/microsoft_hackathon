@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, type FormEvent } from 'react';
 import {
   Activity,
   ArrowDown,
@@ -21,7 +21,22 @@ import {
   PauseCircle,
 } from 'lucide-react';
 import { MOCK_SCENARIOS } from './mock/incidentScenarios';
-import { fetchHealth, getOrganizationalMemory, retainDemoOutcome, HealthCheckResponse, OrganizationalMemoryCategory, OrganizationalMemoryResult } from './api/client';
+import {
+  createWebsiteIntegration,
+  deleteWebsiteIntegration,
+  fetchHealth,
+  getOrganizationalMemory,
+  listWebsiteIntegrations,
+  retainDemoOutcome,
+  scanWebsiteIntegration,
+  testWebsiteIntegrationConnection,
+  type ExternalWebsiteIntegration,
+  type ExternalWebsiteScanResult,
+  type ExternalWebsiteConnectionTestResult,
+  HealthCheckResponse,
+  OrganizationalMemoryCategory,
+  OrganizationalMemoryResult,
+} from './api/client';
 import { createPaymentApiDemoMemory, createPaymentApiDemoScenario, DEMO_INCIDENT_ID, DEMO_STEPS, HINDSIGHT_AB_COMPARISON } from './mock/paymentApiDemo';
 import type { IncidentScenario } from './types/incident';
 import './App.css';
@@ -37,7 +52,8 @@ type ScreenKey =
   | 'timeMachine'
   | 'remediation'
   | 'postmortem'
-  | 'learning';
+  | 'learning'
+  | 'externalIntegrations';
 
 const screens: Array<{ key: ScreenKey; label: string; icon: any }> = [
   { key: 'dashboard', label: 'Dashboard', icon: Layers3 },
@@ -51,6 +67,7 @@ const screens: Array<{ key: ScreenKey; label: string; icon: any }> = [
   { key: 'remediation', label: 'Approval', icon: ShieldCheck },
   { key: 'postmortem', label: 'Postmortem', icon: Database },
   { key: 'learning', label: 'Learning', icon: Radar },
+  { key: 'externalIntegrations', label: 'External Integrations', icon: Network },
 ];
 
 type EvidenceSource = 'Current telemetry' | 'Hindsight' | 'RAG' | 'AI inference';
@@ -81,6 +98,7 @@ const screenTitles: Record<ScreenKey, { title: string; eyebrow: string }> = {
   remediation: { title: 'Remediation approval', eyebrow: 'Human control' },
   postmortem: { title: 'Postmortem', eyebrow: 'Incident review' },
   learning: { title: 'Learning evolution', eyebrow: 'Memory lifecycle' },
+  externalIntegrations: { title: 'External integrations', eyebrow: 'Website / service monitoring' },
 };
 
 const memoryCategoryViews: Array<{ key: OrganizationalMemoryCategory; title: string }> = [
@@ -137,6 +155,22 @@ export function App() {
   const [demoRejected, setDemoRejected] = useState(false);
   const [demoCloudRetention, setDemoCloudRetention] = useState<'not-started' | 'pending' | 'retained' | 'unavailable'>('not-started');
   const [secondDemoIncident, setSecondDemoIncident] = useState(false);
+  const [integrationForm, setIntegrationForm] = useState({
+    name: 'DemoShop',
+    baseUrl: 'http://localhost:9000',
+    healthUrl: 'http://localhost:9000/health',
+    serviceName: 'demo-shop',
+    webhookUrl: '',
+    serviceIdentifier: 'demo-shop',
+    apiKey: '',
+  });
+  const [integrations, setIntegrations] = useState<ExternalWebsiteIntegration[]>([]);
+  const [integrationsLoading, setIntegrationsLoading] = useState(false);
+  const [integrationError, setIntegrationError] = useState<string | null>(null);
+  const [testingIntegrationId, setTestingIntegrationId] = useState<number | null>(null);
+  const [scanningIntegrationId, setScanningIntegrationId] = useState<number | null>(null);
+  const [scanResults, setScanResults] = useState<Record<number, ExternalWebsiteScanResult>>({});
+  const [connectionResults, setConnectionResults] = useState<Record<number, ExternalWebsiteConnectionTestResult>>({});
   const demoMemoryRequests = useRef<Set<string>>(new Set());
 
   const activeCount = MOCK_SCENARIOS.filter((entry) => entry.status !== 'RESOLVED' && entry.status !== 'POSTMORTEM_SAVED').length;
@@ -161,6 +195,98 @@ export function App() {
   useEffect(() => {
     loadHealth();
   }, [loadHealth]);
+
+  const loadIntegrations = useCallback(async () => {
+    setIntegrationsLoading(true);
+    setIntegrationError(null);
+    try {
+      const data = await listWebsiteIntegrations();
+      setIntegrations(data);
+    } catch (err) {
+      setIntegrationError(err instanceof Error ? err.message : 'External integrations could not be loaded.');
+    } finally {
+      setIntegrationsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadIntegrations();
+  }, [loadIntegrations]);
+
+  const handleCreateIntegration = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    try {
+      const created = await createWebsiteIntegration({
+        name: integrationForm.name.trim(),
+        base_url: integrationForm.baseUrl.trim(),
+        health_url: integrationForm.healthUrl.trim() || undefined,
+        service_name: integrationForm.serviceName.trim() || undefined,
+        webhook_url: integrationForm.webhookUrl.trim() || undefined,
+        service_identifier: integrationForm.serviceIdentifier.trim() || undefined,
+        api_key: integrationForm.apiKey.trim() || undefined,
+      });
+      setIntegrations((current) => [created, ...current]);
+      setIntegrationForm({
+        name: 'DemoShop',
+        baseUrl: 'http://localhost:9000',
+        healthUrl: 'http://localhost:9000/health',
+        serviceName: 'demo-shop',
+        webhookUrl: '',
+        serviceIdentifier: 'demo-shop',
+        apiKey: '',
+      });
+      setIntegrationError(null);
+    } catch (err) {
+      setIntegrationError(err instanceof Error ? err.message : 'Could not create the website integration.');
+    }
+  };
+
+  const handleTestIntegration = async (integration: ExternalWebsiteIntegration) => {
+    setTestingIntegrationId(integration.id);
+    try {
+      const result = await testWebsiteIntegrationConnection(integration.id, {
+        api_key: integrationForm.apiKey.trim() || undefined,
+      });
+      setConnectionResults((current) => ({ ...current, [integration.id]: result }));
+      setIntegrations((current) => current.map((entry) => entry.id === integration.id ? { ...entry, status: result.status, last_checked_at: result.last_checked_at, last_response_time_ms: result.response_time_ms, last_status_code: result.http_status_code, last_error: result.error ?? entry.last_error } : entry));
+    } catch (err) {
+      setIntegrationError(err instanceof Error ? err.message : 'Connection test failed.');
+    } finally {
+      setTestingIntegrationId(null);
+    }
+  };
+
+  const handleScanIntegration = async (integration: ExternalWebsiteIntegration) => {
+    setScanningIntegrationId(integration.id);
+    try {
+      const result = await scanWebsiteIntegration(integration.id);
+      setScanResults((current) => ({ ...current, [integration.id]: result }));
+      setIntegrations((current) => current.map((entry) => entry.id === integration.id ? { ...entry, status: result.overall_status, last_checked_at: result.last_checked_at, last_response_time_ms: result.response_time_ms, last_status_code: result.http_status_code, last_error: result.detected_flaws.length > 0 ? result.detected_flaws[0].title : null } : entry));
+    } catch (err) {
+      setIntegrationError(err instanceof Error ? err.message : 'Scan failed.');
+    } finally {
+      setScanningIntegrationId(null);
+    }
+  };
+
+  const handleDeleteIntegration = async (integration: ExternalWebsiteIntegration) => {
+    try {
+      await deleteWebsiteIntegration(integration.id);
+      setIntegrations((current) => current.filter((entry) => entry.id !== integration.id));
+      setConnectionResults((current) => {
+        const next = { ...current };
+        delete next[integration.id];
+        return next;
+      });
+      setScanResults((current) => {
+        const next = { ...current };
+        delete next[integration.id];
+        return next;
+      });
+    } catch (err) {
+      setIntegrationError(err instanceof Error ? err.message : 'Could not delete the integration.');
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -731,6 +857,145 @@ export function App() {
                   </article>
                 </section>
               )}
+            </div>
+          )}
+
+          {screen === 'externalIntegrations' && (
+            <div className="screen-stack">
+              <section className="panel integration-form-panel">
+                <div className="section-header">
+                  <h3>Connect external service</h3>
+                </div>
+                <form className="integration-form" onSubmit={handleCreateIntegration}>
+                  <div className="integration-form-grid">
+                    <label>
+                      <span>Website / service name</span>
+                      <input value={integrationForm.name} onChange={(event) => setIntegrationForm((current) => ({ ...current, name: event.target.value }))} placeholder="DemoShop" />
+                    </label>
+                    <label>
+                      <span>Website URL</span>
+                      <input value={integrationForm.baseUrl} onChange={(event) => setIntegrationForm((current) => ({ ...current, baseUrl: event.target.value }))} placeholder="http://localhost:9000" />
+                    </label>
+                    <label>
+                      <span>Health endpoint</span>
+                      <input value={integrationForm.healthUrl} onChange={(event) => setIntegrationForm((current) => ({ ...current, healthUrl: event.target.value }))} placeholder="http://localhost:9000/health" />
+                    </label>
+                    <label>
+                      <span>Webhook / integration method</span>
+                      <input value={integrationForm.webhookUrl} onChange={(event) => setIntegrationForm((current) => ({ ...current, webhookUrl: event.target.value }))} placeholder="https://example.com/webhook" />
+                    </label>
+                    <label>
+                      <span>Service identifier</span>
+                      <input value={integrationForm.serviceIdentifier} onChange={(event) => setIntegrationForm((current) => ({ ...current, serviceIdentifier: event.target.value }))} placeholder="demo-shop" />
+                    </label>
+                    <label>
+                      <span>Service name</span>
+                      <input value={integrationForm.serviceName} onChange={(event) => setIntegrationForm((current) => ({ ...current, serviceName: event.target.value }))} placeholder="demo-shop" />
+                    </label>
+                    <label className="integration-form__full">
+                      <span>Optional API key / token</span>
+                      <input value={integrationForm.apiKey} onChange={(event) => setIntegrationForm((current) => ({ ...current, apiKey: event.target.value }))} placeholder="Not persisted in the database" type="password" />
+                    </label>
+                  </div>
+                  <div className="integration-form-actions">
+                    <button className="primary-button" type="submit" disabled={integrationsLoading}>Connect website</button>
+                    {integrationError && <span className="integration-error">{integrationError}</span>}
+                  </div>
+                </form>
+              </section>
+
+              <section className="integration-list-grid">
+                {integrations.length === 0 && !integrationsLoading ? (
+                  <div className="panel empty-state compact">
+                    <p>No external website integrations have been added yet.</p>
+                  </div>
+                ) : null}
+
+                {integrations.map((integration) => {
+                  const connection = connectionResults[integration.id];
+                  const result = scanResults[integration.id];
+                  return (
+                    <article key={integration.id} className="panel integration-card">
+                      <div className="section-header">
+                        <div>
+                          <h3>{integration.name}</h3>
+                          <p className="muted-text">{integration.service_name ?? integration.service_identifier ?? 'external service'}</p>
+                        </div>
+                        <span className={`status-badge ${integration.status === 'connected' || integration.status === 'healthy' || integration.status === 'degraded' ? 'status-badge--good' : integration.status === 'failed' || integration.status === 'unavailable' ? 'status-badge--error' : 'status-badge--neutral'}`}>
+                          {integration.status}
+                        </span>
+                      </div>
+
+                      <div className="integration-meta">
+                        <div><span>URL</span><strong>{integration.base_url}</strong></div>
+                        <div><span>Health</span><strong>{integration.health_url ?? 'Not configured'}</strong></div>
+                        <div><span>Last checked</span><strong>{integration.last_checked_at ? new Date(integration.last_checked_at).toLocaleString() : 'Not checked yet'}</strong></div>
+                        <div><span>HTTP</span><strong>{integration.last_status_code ? `HTTP ${integration.last_status_code}` : 'Waiting for test'}</strong></div>
+                        <div><span>Latency</span><strong>{integration.last_response_time_ms ? `${integration.last_response_time_ms} ms` : 'Unavailable'}</strong></div>
+                      </div>
+
+                      <div className="integration-actions">
+                        <button className="secondary-button" type="button" onClick={() => void handleTestIntegration(integration)} disabled={testingIntegrationId === integration.id}>
+                          {testingIntegrationId === integration.id ? 'Testing...' : 'Test Connection'}
+                        </button>
+                        <button className="primary-button" type="button" onClick={() => void handleScanIntegration(integration)} disabled={scanningIntegrationId === integration.id}>
+                          {scanningIntegrationId === integration.id ? 'Analyzing...' : 'Analyze Website'}
+                        </button>
+                        <button className="ghost-button" type="button" onClick={() => void handleDeleteIntegration(integration)}>Delete</button>
+                      </div>
+
+                      {connection && (
+                        <div className="integration-connection-panel">
+                          <div className="section-header">
+                            <h4>Connection</h4>
+                          </div>
+                          <div className="integration-row"><span>Status</span><strong>{connection.reachable ? 'CONNECTED' : 'CONNECTION FAILED'}</strong></div>
+                          <div className="integration-row"><span>HTTP</span><strong>{connection.http_status_code ? `HTTP ${connection.http_status_code}` : 'Unavailable'}</strong></div>
+                          <div className="integration-row"><span>Response time</span><strong>{connection.response_time_ms ? `${connection.response_time_ms} ms` : 'Unavailable'}</strong></div>
+                          <div className="integration-row"><span>Reason</span><strong>{connection.error ?? connection.health_status ?? 'Healthy endpoint response'}</strong></div>
+                        </div>
+                      )}
+
+                      {result && (
+                        <div className="integration-health-panel">
+                          <div className="section-header">
+                            <h4>External System Health</h4>
+                          </div>
+                          <div className="integration-health-grid">
+                            <div><span>Overall</span><strong>{result.overall_status.toUpperCase()}</strong></div>
+                            <div><span>API</span><strong>{result.api_status}</strong></div>
+                            <div><span>Dependencies</span><strong>{result.dependencies_status}</strong></div>
+                            <div><span>Database</span><strong>{result.database_status}</strong></div>
+                          </div>
+                          <div className="flaw-list">
+                            {result.detected_flaws.map((flaw) => (
+                              <div key={flaw.flaw_id} className="flaw-card">
+                                <div className="flaw-card__header">
+                                  <span className={`severity-badge ${flaw.severity === 'HIGH' ? 'severity--sev2' : flaw.severity === 'MEDIUM' ? 'severity--sev3' : 'severity--sev4'}`}>{flaw.severity}</span>
+                                  <strong>{flaw.title}</strong>
+                                  <span className="flaw-card__state">{flaw.status}</span>
+                                </div>
+                                <p>{flaw.description}</p>
+                                <div className="flaw-card__meta">
+                                  <span>Affected endpoint: {flaw.affected_endpoint}</span>
+                                  <span>Observed: {flaw.observed_value}</span>
+                                  <span>Expected: {flaw.expected_value}</span>
+                                </div>
+                                <div className="flaw-card__evidence">
+                                  {flaw.evidence.map((entry) => (
+                                    <li key={entry}>{entry}</li>
+                                  ))}
+                                </div>
+                                <div className="flaw-card__footer">Impact: {flaw.impact}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
+              </section>
             </div>
           )}
 

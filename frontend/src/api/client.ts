@@ -217,3 +217,144 @@ export async function getOrganizationalMemory(params: {
 
   return response.json();
 }
+
+export interface ExternalWebsiteIntegration {
+  id: number;
+  name: string;
+  base_url: string;
+  health_url?: string | null;
+  webhook_url?: string | null;
+  service_name?: string | null;
+  service_identifier?: string | null;
+  integration_method: string;
+  status: string;
+  last_checked_at?: string | null;
+  last_response_time_ms?: number | null;
+  last_status_code?: number | null;
+  last_error?: string | null;
+  metadata_json: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ExternalWebsiteConnectionTestResult {
+  integration_id: number;
+  status: string;
+  reachable: boolean;
+  http_status_code?: number | null;
+  response_time_ms?: number | null;
+  timeout_seconds: number;
+  endpoint: string;
+  health_status?: string | null;
+  health_payload?: Record<string, any> | null;
+  last_checked_at: string;
+  error?: string | null;
+}
+
+export interface ExternalWebsiteFlaw {
+  flaw_id: string;
+  title: string;
+  category: string;
+  severity: string;
+  confidence: number;
+  status: string;
+  description: string;
+  evidence: string[];
+  affected_endpoint: string;
+  observed_value: string;
+  expected_value: string;
+  impact: string;
+  likely_cause: string;
+  recommended_action: string;
+}
+
+export interface ExternalWebsiteScanResult {
+  integration_id: number;
+  service: string;
+  overall_status: string;
+  health_status: string;
+  api_status: string;
+  dependencies_status: string;
+  database_status: string;
+  http_status_code?: number | null;
+  response_time_ms?: number | null;
+  incident_id?: string | null;
+  detected_flaws: ExternalWebsiteFlaw[];
+  evidence_summary: string[];
+  last_checked_at: string;
+  raw_data: Record<string, any>;
+}
+
+export async function createWebsiteIntegration(payload: {
+  name: string;
+  base_url: string;
+  health_url?: string;
+  webhook_url?: string;
+  service_name?: string;
+  service_identifier?: string;
+  integration_method?: string;
+  api_key?: string;
+}): Promise<ExternalWebsiteIntegration> {
+  const response = await fetch(`${API_BASE_URL}/integrations/websites`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to create integration: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function listWebsiteIntegrations(): Promise<ExternalWebsiteIntegration[]> {
+  const response = await fetch(`${API_BASE_URL}/integrations/websites`, {
+    headers: { 'Accept': 'application/json' },
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to list integrations: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function getWebsiteIntegration(id: number): Promise<ExternalWebsiteIntegration> {
+  const response = await fetch(`${API_BASE_URL}/integrations/websites/${id}`, {
+    headers: { 'Accept': 'application/json' },
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to get integration: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function testWebsiteIntegrationConnection(id: number, payload?: { api_key?: string }): Promise<ExternalWebsiteConnectionTestResult> {
+  const response = await fetch(`${API_BASE_URL}/integrations/websites/${id}/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(payload ?? {}),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to test integration: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function scanWebsiteIntegration(id: number): Promise<ExternalWebsiteScanResult> {
+  const response = await fetch(`${API_BASE_URL}/integrations/websites/${id}/scan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ force_refresh: true }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to scan integration: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function deleteWebsiteIntegration(id: number): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/integrations/websites/${id}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to delete integration: ${response.statusText}`);
+  }
+}

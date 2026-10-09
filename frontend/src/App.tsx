@@ -30,6 +30,7 @@ import {
   retainDemoOutcome,
   scanWebsiteIntegration,
   testWebsiteIntegrationConnection,
+  updateWebsiteIntegration,
   type ExternalWebsiteIntegration,
   type ExternalWebsiteScanResult,
   type ExternalWebsiteConnectionTestResult,
@@ -101,6 +102,38 @@ const screenTitles: Record<ScreenKey, { title: string; eyebrow: string }> = {
   externalIntegrations: { title: 'External integrations', eyebrow: 'Website / service monitoring' },
 };
 
+const EXTERNAL_ANALYSIS_STEPS = [
+  'Initialize the analysis and identify the selected integration',
+  'Validate the target URL and permitted scheme',
+  'Resolve and validate the target hostname',
+  'Establish HTTP/HTTPS connectivity',
+  'Follow and evaluate permitted redirects',
+  'Record the final URL and HTTP response status',
+  'Measure response time',
+  'Inspect the response content type',
+  'Evaluate TLS/HTTPS information when applicable',
+  'Check whether a configured health endpoint exists',
+  'Request the health endpoint when configured',
+  'Validate and interpret the health response',
+  'Identify whether a supported metrics endpoint is configured',
+  'Request the metrics endpoint when configured',
+  'Validate and interpret the available metrics',
+  'Check API latency against documented thresholds when evidence exists',
+  'Evaluate observed error rates when sufficient metrics exist',
+  'Evaluate dependency health when supported evidence exists',
+  'Evaluate database-pool health only when actual or explicitly simulated metrics are available',
+  'Correlate the observations and determine which findings are supported',
+  'Assign finding severity, confidence, impact, evidence, and recommendations',
+  'Finalize the report and update the integration\'s latest scan results',
+] as const;
+
+const getStatusBadgeClass = (status: string) => {
+  const normalized = status.toLowerCase();
+  if (['healthy', 'connected', 'reachable', 'ok', 'success', 'available'].includes(normalized)) return 'status-badge--good';
+  if (['unavailable', 'failed', 'error', 'down', 'unreachable'].includes(normalized)) return 'status-badge--error';
+  return 'status-badge--neutral';
+};
+
 const memoryCategoryViews: Array<{ key: OrganizationalMemoryCategory; title: string }> = [
   { key: 'historical_incidents', title: 'Historical incidents' },
   { key: 'root_causes', title: 'Root causes' },
@@ -155,15 +188,17 @@ export function App() {
   const [demoRejected, setDemoRejected] = useState(false);
   const [demoCloudRetention, setDemoCloudRetention] = useState<'not-started' | 'pending' | 'retained' | 'unavailable'>('not-started');
   const [secondDemoIncident, setSecondDemoIncident] = useState(false);
-  const [integrationForm, setIntegrationForm] = useState({
-    name: 'DemoShop',
-    baseUrl: 'http://localhost:9000',
-    healthUrl: 'http://localhost:9000/health',
-    serviceName: 'demo-shop',
+  const emptyIntegrationForm = {
+    name: '',
+    baseUrl: '',
+    healthUrl: '',
+    serviceName: '',
     webhookUrl: '',
-    serviceIdentifier: 'demo-shop',
+    serviceIdentifier: '',
     apiKey: '',
-  });
+  };
+  const [integrationForm, setIntegrationForm] = useState(emptyIntegrationForm);
+  const [editingIntegrationId, setEditingIntegrationId] = useState<number | null>(null);
   const [integrations, setIntegrations] = useState<ExternalWebsiteIntegration[]>([]);
   const [integrationsLoading, setIntegrationsLoading] = useState(false);
   const [integrationError, setIntegrationError] = useState<string | null>(null);
@@ -171,6 +206,15 @@ export function App() {
   const [scanningIntegrationId, setScanningIntegrationId] = useState<number | null>(null);
   const [scanResults, setScanResults] = useState<Record<number, ExternalWebsiteScanResult>>({});
   const [connectionResults, setConnectionResults] = useState<Record<number, ExternalWebsiteConnectionTestResult>>({});
+  const [externalWorkflow, setExternalWorkflow] = useState<{
+    integrationId: number;
+    progress: number;
+    running: boolean;
+    approvalPending: boolean;
+    triggerPending: boolean;
+    approvalGranted: boolean;
+    triggerGranted: boolean;
+  } | null>(null);
   const demoMemoryRequests = useRef<Set<string>>(new Set());
 
   const activeCount = MOCK_SCENARIOS.filter((entry) => entry.status !== 'RESOLVED' && entry.status !== 'POSTMORTEM_SAVED').length;
@@ -213,31 +257,71 @@ export function App() {
     void loadIntegrations();
   }, [loadIntegrations]);
 
+  const resetIntegrationForm = () => {
+    setIntegrationForm(emptyIntegrationForm);
+    setEditingIntegrationId(null);
+    setIntegrationError(null);
+  };
+
+  const reuseIntegration = (integration: ExternalWebsiteIntegration) => {
+    setIntegrationForm({
+      name: integration.name,
+      baseUrl: integration.base_url,
+      healthUrl: integration.health_url || '',
+      serviceName: integration.service_name || '',
+      webhookUrl: integration.webhook_url || '',
+      serviceIdentifier: integration.service_identifier || '',
+      apiKey: '',
+    });
+    setEditingIntegrationId(integration.id);
+    setIntegrationError('Integration already exists. Edit the saved record below or update the entry to reuse it.');
+  };
+
   const handleCreateIntegration = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const payload = {
+      name: integrationForm.name.trim(),
+      base_url: integrationForm.baseUrl.trim(),
+      health_url: integrationForm.healthUrl.trim() || undefined,
+      service_name: integrationForm.serviceName.trim() || undefined,
+      webhook_url: integrationForm.webhookUrl.trim() || undefined,
+      service_identifier: integrationForm.serviceIdentifier.trim() || undefined,
+      api_key: integrationForm.apiKey.trim() || undefined,
+    };
+
     try {
-      const created = await createWebsiteIntegration({
-        name: integrationForm.name.trim(),
-        base_url: integrationForm.baseUrl.trim(),
-        health_url: integrationForm.healthUrl.trim() || undefined,
-        service_name: integrationForm.serviceName.trim() || undefined,
-        webhook_url: integrationForm.webhookUrl.trim() || undefined,
-        service_identifier: integrationForm.serviceIdentifier.trim() || undefined,
-        api_key: integrationForm.apiKey.trim() || undefined,
-      });
+      if (editingIntegrationId !== null) {
+        const updated = await updateWebsiteIntegration(editingIntegrationId, payload);
+        setIntegrations((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
+        setConnectionResults((current) => {
+          const next = { ...current };
+          delete next[updated.id];
+          return next;
+        });
+        setScanResults((current) => {
+          const next = { ...current };
+          delete next[updated.id];
+          return next;
+        });
+        resetIntegrationForm();
+        return;
+      }
+
+      const created = await createWebsiteIntegration(payload);
       setIntegrations((current) => [created, ...current]);
-      setIntegrationForm({
-        name: 'DemoShop',
-        baseUrl: 'http://localhost:9000',
-        healthUrl: 'http://localhost:9000/health',
-        serviceName: 'demo-shop',
-        webhookUrl: '',
-        serviceIdentifier: 'demo-shop',
-        apiKey: '',
-      });
-      setIntegrationError(null);
+      resetIntegrationForm();
     } catch (err) {
-      setIntegrationError(err instanceof Error ? err.message : 'Could not create the website integration.');
+      const message = err instanceof Error ? err.message : 'Could not create the website integration.';
+      if (/already exists/i.test(message)) {
+        const normalized = (integrationForm.name || '').trim().toLowerCase();
+        const existing = integrations.find((entry) => entry.name.toLowerCase() === normalized || entry.base_url.toLowerCase() === integrationForm.baseUrl.trim().toLowerCase());
+        if (existing) {
+          reuseIntegration(existing);
+          setIntegrationError(`Integration "${existing.name}" already exists. Reuse the existing record or edit it below.`);
+          return;
+        }
+      }
+      setIntegrationError(message);
     }
   };
 
@@ -256,17 +340,39 @@ export function App() {
     }
   };
 
-  const handleScanIntegration = async (integration: ExternalWebsiteIntegration) => {
+  const beginExternalScan = (integration: ExternalWebsiteIntegration) => {
+    setIntegrationError(null);
     setScanningIntegrationId(integration.id);
-    try {
-      const result = await scanWebsiteIntegration(integration.id);
-      setScanResults((current) => ({ ...current, [integration.id]: result }));
-      setIntegrations((current) => current.map((entry) => entry.id === integration.id ? { ...entry, status: result.overall_status, last_checked_at: result.last_checked_at, last_response_time_ms: result.response_time_ms, last_status_code: result.http_status_code, last_error: result.detected_flaws.length > 0 ? result.detected_flaws[0].title : null } : entry));
-    } catch (err) {
-      setIntegrationError(err instanceof Error ? err.message : 'Scan failed.');
-    } finally {
-      setScanningIntegrationId(null);
+    setExternalWorkflow({
+      integrationId: integration.id,
+      progress: 0,
+      running: true,
+      approvalPending: false,
+      triggerPending: false,
+      approvalGranted: false,
+      triggerGranted: false,
+    });
+    setScanResults((current) => {
+      const next = { ...current };
+      delete next[integration.id];
+      return next;
+    });
+    setIntegrations((current) => current.map((entry) => entry.id === integration.id ? { ...entry, status: 'running' } : entry));
+  };
+
+  const approveExternalWorkflow = () => {
+    setExternalWorkflow((current) => current ? { ...current, progress: 15, running: true, approvalPending: false, approvalGranted: true } : current);
+  };
+
+  const triggerExternalWorkflow = () => {
+    setExternalWorkflow((current) => current ? { ...current, progress: 21, running: true, triggerPending: false, triggerGranted: true } : current);
+  };
+
+  const handleScanIntegration = (integration: ExternalWebsiteIntegration) => {
+    if (scanningIntegrationId === integration.id || externalWorkflow?.integrationId === integration.id) {
+      return;
     }
+    beginExternalScan(integration);
   };
 
   const handleDeleteIntegration = async (integration: ExternalWebsiteIntegration) => {
@@ -287,6 +393,52 @@ export function App() {
       setIntegrationError(err instanceof Error ? err.message : 'Could not delete the integration.');
     }
   };
+
+  useEffect(() => {
+    if (!externalWorkflow) return;
+    const integration = integrations.find((entry) => entry.id === externalWorkflow.integrationId);
+    if (!integration) return;
+
+    if (externalWorkflow.progress >= EXTERNAL_ANALYSIS_STEPS.length) {
+      const finalizeExternalScan = async () => {
+        try {
+          const result = await scanWebsiteIntegration(integration.id);
+          setScanResults((current) => ({ ...current, [integration.id]: result }));
+          setIntegrations((current) => current.map((entry) => entry.id === integration.id ? { ...entry, status: result.overall_status, last_checked_at: result.last_checked_at, last_response_time_ms: result.response_time_ms, last_status_code: result.http_status_code, last_error: result.detected_flaws.length > 0 ? result.detected_flaws[0].title : null } : entry));
+        } catch (err) {
+          setIntegrationError(err instanceof Error ? err.message : 'Scan failed.');
+        } finally {
+          setScanningIntegrationId(null);
+          setExternalWorkflow(null);
+        }
+      };
+
+      void finalizeExternalScan();
+      return;
+    }
+
+    if (!externalWorkflow.running) return;
+
+    if (externalWorkflow.progress === 14 && !externalWorkflow.approvalGranted) {
+      setExternalWorkflow((current) => current ? { ...current, running: false, approvalPending: true } : current);
+      return;
+    }
+
+    if (externalWorkflow.progress === 20 && !externalWorkflow.triggerGranted) {
+      setExternalWorkflow((current) => current ? { ...current, running: false, triggerPending: true } : current);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setExternalWorkflow((current) => {
+        if (!current) return null;
+        const nextProgress = Math.min(EXTERNAL_ANALYSIS_STEPS.length, current.progress + 1);
+        return { ...current, progress: nextProgress, running: nextProgress < EXTERNAL_ANALYSIS_STEPS.length };
+      });
+    }, 1200);
+
+    return () => window.clearTimeout(timer);
+  }, [externalWorkflow, integrations]);
 
   useEffect(() => {
     let cancelled = false;
@@ -870,35 +1022,40 @@ export function App() {
                   <div className="integration-form-grid">
                     <label>
                       <span>Website / service name</span>
-                      <input value={integrationForm.name} onChange={(event) => setIntegrationForm((current) => ({ ...current, name: event.target.value }))} placeholder="DemoShop" />
+                      <input required value={integrationForm.name} onChange={(event) => setIntegrationForm((current) => ({ ...current, name: event.target.value }))} placeholder="Enter a website or service name" />
                     </label>
                     <label>
                       <span>Website URL</span>
-                      <input value={integrationForm.baseUrl} onChange={(event) => setIntegrationForm((current) => ({ ...current, baseUrl: event.target.value }))} placeholder="http://localhost:9000" />
+                      <input required type="url" value={integrationForm.baseUrl} onChange={(event) => setIntegrationForm((current) => ({ ...current, baseUrl: event.target.value }))} placeholder="https://example.com" />
                     </label>
                     <label>
                       <span>Health endpoint</span>
-                      <input value={integrationForm.healthUrl} onChange={(event) => setIntegrationForm((current) => ({ ...current, healthUrl: event.target.value }))} placeholder="http://localhost:9000/health" />
+                      <input type="url" value={integrationForm.healthUrl} onChange={(event) => setIntegrationForm((current) => ({ ...current, healthUrl: event.target.value }))} placeholder="https://example.com/health (optional)" />
                     </label>
                     <label>
-                      <span>Webhook / integration method</span>
-                      <input value={integrationForm.webhookUrl} onChange={(event) => setIntegrationForm((current) => ({ ...current, webhookUrl: event.target.value }))} placeholder="https://example.com/webhook" />
+                      <span>Webhook URL</span>
+                      <input type="url" value={integrationForm.webhookUrl} onChange={(event) => setIntegrationForm((current) => ({ ...current, webhookUrl: event.target.value }))} placeholder="https://example.com/webhook" />
                     </label>
                     <label>
                       <span>Service identifier</span>
-                      <input value={integrationForm.serviceIdentifier} onChange={(event) => setIntegrationForm((current) => ({ ...current, serviceIdentifier: event.target.value }))} placeholder="demo-shop" />
+                      <input value={integrationForm.serviceIdentifier} onChange={(event) => setIntegrationForm((current) => ({ ...current, serviceIdentifier: event.target.value }))} placeholder="Enter service identifier (optional)" />
                     </label>
                     <label>
                       <span>Service name</span>
-                      <input value={integrationForm.serviceName} onChange={(event) => setIntegrationForm((current) => ({ ...current, serviceName: event.target.value }))} placeholder="demo-shop" />
+                      <input value={integrationForm.serviceName} onChange={(event) => setIntegrationForm((current) => ({ ...current, serviceName: event.target.value }))} placeholder="Enter service name (optional)" />
                     </label>
                     <label className="integration-form__full">
-                      <span>Optional API key / token</span>
-                      <input value={integrationForm.apiKey} onChange={(event) => setIntegrationForm((current) => ({ ...current, apiKey: event.target.value }))} placeholder="Not persisted in the database" type="password" />
+                      <span>API key or token</span>
+                      <input value={integrationForm.apiKey} onChange={(event) => setIntegrationForm((current) => ({ ...current, apiKey: event.target.value }))} placeholder="Enter API key or token (optional)" type="password" />
                     </label>
                   </div>
                   <div className="integration-form-actions">
-                    <button className="primary-button" type="submit" disabled={integrationsLoading}>Connect website</button>
+                    <button className="primary-button" type="submit" disabled={integrationsLoading}>
+                      {editingIntegrationId !== null ? 'Save integration' : 'Connect website'}
+                    </button>
+                    {editingIntegrationId !== null && (
+                      <button className="secondary-button" type="button" onClick={resetIntegrationForm}>Cancel</button>
+                    )}
                     {integrationError && <span className="integration-error">{integrationError}</span>}
                   </div>
                 </form>
@@ -914,6 +1071,10 @@ export function App() {
                 {integrations.map((integration) => {
                   const connection = connectionResults[integration.id];
                   const result = scanResults[integration.id];
+                  const workflow = externalWorkflow?.integrationId === integration.id ? externalWorkflow : null;
+                  const workflowVisible = Boolean(workflow || result);
+                  const scanProgress = workflow ? workflow.progress : result ? EXTERNAL_ANALYSIS_STEPS.length : 0;
+                  const workflowState = workflow?.approvalPending ? 'Approval required' : workflow?.triggerPending ? 'Follow-up required' : workflow ? 'Running' : result ? 'Complete' : 'Queued';
                   return (
                     <article key={integration.id} className="panel integration-card">
                       <div className="section-header">
@@ -921,7 +1082,7 @@ export function App() {
                           <h3>{integration.name}</h3>
                           <p className="muted-text">{integration.service_name ?? integration.service_identifier ?? 'external service'}</p>
                         </div>
-                        <span className={`status-badge ${integration.status === 'connected' || integration.status === 'healthy' || integration.status === 'degraded' ? 'status-badge--good' : integration.status === 'failed' || integration.status === 'unavailable' ? 'status-badge--error' : 'status-badge--neutral'}`}>
+                        <span className={`status-badge ${getStatusBadgeClass(integration.status)}`}>
                           {integration.status}
                         </span>
                       </div>
@@ -938,11 +1099,59 @@ export function App() {
                         <button className="secondary-button" type="button" onClick={() => void handleTestIntegration(integration)} disabled={testingIntegrationId === integration.id}>
                           {testingIntegrationId === integration.id ? 'Testing...' : 'Test Connection'}
                         </button>
-                        <button className="primary-button" type="button" onClick={() => void handleScanIntegration(integration)} disabled={scanningIntegrationId === integration.id}>
-                          {scanningIntegrationId === integration.id ? 'Analyzing...' : 'Analyze Website'}
+                        <button className="primary-button" type="button" onClick={() => void handleScanIntegration(integration)} disabled={scanningIntegrationId === integration.id || (workflow !== null && workflow.running)}>
+                          {scanningIntegrationId === integration.id || (workflow !== null && workflow.running) ? 'Analyzing...' : 'Analyze Website'}
                         </button>
+                        <button className="ghost-button" type="button" onClick={() => reuseIntegration(integration)}>Edit</button>
                         <button className="ghost-button" type="button" onClick={() => void handleDeleteIntegration(integration)}>Delete</button>
                       </div>
+
+                      {workflowVisible && (
+                        <div className="integration-health-panel">
+                          <div className="section-header">
+                            <h4>External analysis workflow</h4>
+                            <span className={`status-badge ${workflow ? getStatusBadgeClass(workflow.approvalPending || workflow.triggerPending ? 'warning' : workflow.running ? 'running' : 'healthy') : 'status-badge--good'}`}>
+                              {workflowState}
+                            </span>
+                          </div>
+
+                          {workflow && workflow.approvalPending && (
+                            <div className="demo-approval-gate">
+                              <div>
+                                <strong>Approve external findings before finalizing?</strong>
+                                <p>The checks have reached the final evidence review stage and need human confirmation before the report is finalized.</p>
+                              </div>
+                              <button className="primary-button" type="button" onClick={approveExternalWorkflow}>Approve &amp; continue</button>
+                            </div>
+                          )}
+
+                          {workflow && workflow.triggerPending && (
+                            <div className="demo-approval-gate">
+                              <div>
+                                <strong>Trigger the follow-up audit?</strong>
+                                <p>The analysis reached the final handoff stage; a follow-up check can be triggered before the scan is closed.</p>
+                              </div>
+                              <button className="primary-button" type="button" onClick={triggerExternalWorkflow}>Trigger similar check</button>
+                            </div>
+                          )}
+
+                          <progress className="demo-progress" max={EXTERNAL_ANALYSIS_STEPS.length} value={scanProgress} aria-label={`External analysis workflow progress for ${integration.name}`} />
+                          <ol className="demo-step-list">
+                            {EXTERNAL_ANALYSIS_STEPS.map((step, index) => {
+                              const complete = (workflow ? index < workflow.progress : !!result) || (result && index < EXTERNAL_ANALYSIS_STEPS.length);
+                              const current = workflow ? workflow.running && index === workflow.progress : false;
+                              return (
+                                <li key={`${integration.id}-${index}`} className={`demo-step ${complete ? 'demo-step--complete' : current ? 'demo-step--current' : ''}`}>
+                                  <span className="demo-step__icon">{complete ? <CircleCheck size={16} /> : <Circle size={16} />}</span>
+                                  <span className="demo-step__number">{String(index + 1).padStart(2, '0')}</span>
+                                  <div><strong>{step}</strong></div>
+                                  <span className="demo-step__state">{complete ? 'Done' : current ? 'Running' : 'Pending'}</span>
+                                </li>
+                              );
+                            })}
+                          </ol>
+                        </div>
+                      )}
 
                       {connection && (
                         <div className="integration-connection-panel">
@@ -968,27 +1177,41 @@ export function App() {
                             <div><span>Database</span><strong>{result.database_status}</strong></div>
                           </div>
                           <div className="flaw-list">
-                            {result.detected_flaws.map((flaw) => (
-                              <div key={flaw.flaw_id} className="flaw-card">
+                            {result.detected_flaws.length === 0 ? (
+                              <div className="flaw-card">
                                 <div className="flaw-card__header">
-                                  <span className={`severity-badge ${flaw.severity === 'HIGH' ? 'severity--sev2' : flaw.severity === 'MEDIUM' ? 'severity--sev3' : 'severity--sev4'}`}>{flaw.severity}</span>
-                                  <strong>{flaw.title}</strong>
-                                  <span className="flaw-card__state">{flaw.status}</span>
+                                  <span className="status-badge status-badge--good">No flaws detected</span>
                                 </div>
-                                <p>{flaw.description}</p>
-                                <div className="flaw-card__meta">
-                                  <span>Affected endpoint: {flaw.affected_endpoint}</span>
-                                  <span>Observed: {flaw.observed_value}</span>
-                                  <span>Expected: {flaw.expected_value}</span>
-                                </div>
-                                <div className="flaw-card__evidence">
-                                  {flaw.evidence.map((entry) => (
-                                    <li key={entry}>{entry}</li>
-                                  ))}
-                                </div>
-                                <div className="flaw-card__footer">Impact: {flaw.impact}</div>
+                                <p>No flaws were identified by the checks performed for this website.</p>
+                                {result.evidence_summary.length > 0 && (
+                                  <ul className="flaw-card__evidence">
+                                    {result.evidence_summary.map((entry) => <li key={entry}>{entry}</li>)}
+                                  </ul>
+                                )}
                               </div>
-                            ))}
+                            ) : (
+                              result.detected_flaws.map((flaw) => (
+                                <div key={flaw.flaw_id} className="flaw-card">
+                                  <div className="flaw-card__header">
+                                    <span className={`severity-badge ${flaw.severity === 'HIGH' ? 'severity--sev2' : flaw.severity === 'MEDIUM' ? 'severity--sev3' : flaw.severity === 'LOW' ? 'severity--sev4' : 'severity--sev4'}`}>{flaw.severity}</span>
+                                    <strong>{flaw.title}</strong>
+                                    <span className="flaw-card__state">{flaw.status}</span>
+                                  </div>
+                                  <p>{flaw.description}</p>
+                                  <div className="flaw-card__meta">
+                                    <span>Affected endpoint: {flaw.affected_endpoint}</span>
+                                    <span>Observed: {flaw.observed_value}</span>
+                                    <span>Expected: {flaw.expected_value}</span>
+                                  </div>
+                                  <div className="flaw-card__evidence">
+                                    {flaw.evidence.map((entry) => (
+                                      <li key={entry}>{entry}</li>
+                                    ))}
+                                  </div>
+                                  <div className="flaw-card__footer">Impact: {flaw.impact}</div>
+                                </div>
+                              ))
+                            )}
                           </div>
                         </div>
                       )}

@@ -226,6 +226,7 @@ export interface ExternalWebsiteIntegration {
   webhook_url?: string | null;
   service_name?: string | null;
   service_identifier?: string | null;
+  metrics_url?: string | null;
   integration_method: string;
   status: string;
   last_checked_at?: string | null;
@@ -281,6 +282,8 @@ export interface ExternalWebsiteScanResult {
   incident_id?: string | null;
   detected_flaws: ExternalWebsiteFlaw[];
   evidence_summary: string[];
+  checks_performed: string[];
+  checks_skipped: string[];
   last_checked_at: string;
   raw_data: Record<string, any>;
 }
@@ -289,6 +292,7 @@ export async function createWebsiteIntegration(payload: {
   name: string;
   base_url: string;
   health_url?: string;
+  metrics_url?: string;
   webhook_url?: string;
   service_name?: string;
   service_identifier?: string;
@@ -346,6 +350,28 @@ export async function scanWebsiteIntegration(id: number): Promise<ExternalWebsit
   });
   if (!response.ok) {
     throw new Error(`Failed to scan integration: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function updateWebsiteIntegration(id: number, payload: {
+  name?: string;
+  base_url?: string;
+  health_url?: string;
+  metrics_url?: string;
+  webhook_url?: string;
+  service_name?: string;
+  service_identifier?: string;
+  api_key?: string;
+}): Promise<ExternalWebsiteIntegration> {
+  const response = await fetch(`${API_BASE_URL}/integrations/websites/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `Failed to update integration: ${response.statusText}`);
   }
   return response.json();
 }

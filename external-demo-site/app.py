@@ -129,7 +129,8 @@ async def health():
 async def metrics():
     request_total = request_counter or 1
     error_total = error_counter
-    error_rate = error_total / request_total
+    observed_error_rate = error_total / request_total
+    configured_checkout_failure_rate = read_float("CHECKOUT_FAILURE_RATE", 0.0)
     avg_latency = sum(request_history) / len(request_history) if request_history else 0
     db_pool_usage = 98 if read_bool("HIGH_DB_POOL") else 52
     dependency_status = "unavailable" if read_bool("DEPENDENCY_UNAVAILABLE") else "available"
@@ -138,7 +139,7 @@ async def metrics():
         active_failures.append("slow_api")
     if read_bool("DEPENDENCY_UNAVAILABLE"):
         active_failures.append("dependency_unavailable")
-    if read_float("CHECKOUT_FAILURE_RATE", 0.0) > 0:
+    if configured_checkout_failure_rate > 0:
         active_failures.append("checkout_failures")
     if read_bool("HIGH_DB_POOL"):
         active_failures.append("high_db_pool")
@@ -147,7 +148,9 @@ async def metrics():
         "service": "demo-shop",
         "request_count": request_total,
         "error_count": error_total,
-        "error_rate": round(error_rate, 4),
+        "error_rate": round(observed_error_rate, 4),
+        "checkout_failure_probability": round(configured_checkout_failure_rate, 4),
+        "observed_checkout_error_rate": round(observed_error_rate, 4),
         "average_response_time_ms": int(avg_latency),
         "database_pool_usage_percent": db_pool_usage,
         "dependency_status": dependency_status,

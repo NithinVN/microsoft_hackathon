@@ -3,13 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ExternalWebsiteIntegrationCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=150)
     base_url: str = Field(..., min_length=8, max_length=512)
     health_url: Optional[str] = Field(default=None, max_length=512)
+    metrics_url: Optional[str] = Field(default=None, max_length=512)
     webhook_url: Optional[str] = Field(default=None, max_length=512)
     service_name: Optional[str] = Field(default=None, max_length=150)
     service_identifier: Optional[str] = Field(default=None, max_length=150)
@@ -21,6 +22,7 @@ class ExternalWebsiteIntegrationUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=2, max_length=150)
     base_url: Optional[str] = Field(default=None, min_length=8, max_length=512)
     health_url: Optional[str] = Field(default=None, max_length=512)
+    metrics_url: Optional[str] = Field(default=None, max_length=512)
     webhook_url: Optional[str] = Field(default=None, max_length=512)
     service_name: Optional[str] = Field(default=None, max_length=150)
     service_identifier: Optional[str] = Field(default=None, max_length=150)
@@ -35,6 +37,7 @@ class ExternalWebsiteIntegrationRead(BaseModel):
     name: str
     base_url: str
     health_url: Optional[str] = None
+    metrics_url: Optional[str] = None
     webhook_url: Optional[str] = None
     service_name: Optional[str] = None
     service_identifier: Optional[str] = None
@@ -47,6 +50,15 @@ class ExternalWebsiteIntegrationRead(BaseModel):
     metadata_json: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hydrate_metrics_url(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            metadata = values.get("metadata_json") or {}
+            if values.get("metrics_url") is None and isinstance(metadata, dict):
+                values["metrics_url"] = metadata.get("metrics_url")
+        return values
 
 
 class ExternalWebsiteConnectionTestResult(BaseModel):
@@ -93,6 +105,8 @@ class ExternalWebsiteScanResult(BaseModel):
     incident_id: Optional[str] = None
     detected_flaws: List[ExternalWebsiteFlaw] = Field(default_factory=list)
     evidence_summary: List[str] = Field(default_factory=list)
+    checks_performed: List[str] = Field(default_factory=list)
+    checks_skipped: List[str] = Field(default_factory=list)
     last_checked_at: datetime
     raw_data: Dict[str, Any] = Field(default_factory=dict)
 

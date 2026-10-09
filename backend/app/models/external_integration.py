@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from sqlalchemy import DateTime, Integer, JSON, String, Text
+from sqlalchemy import DateTime, Index, Integer, JSON, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.db.base import Base
@@ -17,6 +17,10 @@ class ExternalWebsiteIntegration(Base):
     """Persisted metadata for externally monitored website and service integrations."""
 
     __tablename__ = "external_website_integrations"
+    __table_args__ = (
+        Index("ix_external_website_integrations_name_unique", "name", unique=True),
+        Index("ix_external_website_integrations_base_url_unique", "base_url", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
